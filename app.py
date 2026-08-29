@@ -666,6 +666,58 @@ def finalize_interview(interview_id, score, evaluation_text):
         except Exception:
             pass
 
+def get_skill_progress(user_id):
+    """Per-skill scores across every session this user has completed.
+
+    Reads the answer rows rather than the interview totals, because "you
+    improved" is only useful when it names the skill: an average that moves
+    from 60 to 68 tells a candidate nothing about what to practise next, while
+    "Docker 45% -> 82%, Kubernetes still 30%" tells them exactly.
+
+    Returns {skill: [(session_date, mean_score), ...]} ordered oldest first.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return {}, False
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT i.id, i.session_date, a.question_text, a.score,
+                   a.evaluation_json
+            FROM interviews i
+            JOIN interview_qa a ON a.interview_id = i.id
+            WHERE i.user_id = %s AND a.score IS NOT NULL
+            ORDER BY i.session_date, a.id
+        """, (user_id,))
+        rows = cursor.fetchall()
+    except Error:
+        return {}, False
+    finally:
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
+
+    # The skill each answer belonged to lives in the evaluation payload; older
+    # rows predate that field, so they are grouped by interview instead of
+    # being dropped.
+    per_session = {}
+    for r in rows:
+        skill = "general"
+        if r.get("evaluation_json"):
+            try:
+                skill = json.loads(r["evaluation_json"]).get("targets_skill") or "general"
+            except (ValueError, TypeError):
+                pass
+        per_session.setdefault((r["id"], r["session_date"]), {}).setdefault(skill, []).append(r["score"])
+
+    progress = {}
+    for (_, when), skills in sorted(per_session.items(), key=lambda kv: kv[0][1]):
+        for skill, scores in skills.items():
+            progress.setdefault(skill, []).append((when, sum(scores) / len(scores)))
+    return progress, True
+
+
 def get_user_interview_history(user_id):
     """Returns (rows, ok). `ok` is False when the database could not be read.
 
@@ -829,9 +881,20 @@ def render_dashboard():
     valid_scores = [item['score'] for item in history if item.get('score') is not None]
     avg_score = int(sum(valid_scores) / len(valid_scores)) if len(valid_scores) > 0 else 0
 
+    # Change since the previous session — the single number a returning
+    # candidate actually looks for. Shown only from the second session on,
+    # because "+0%" against nothing is noise.
+    delta_txt = ""
+    if len(valid_scores) >= 2:
+        delta = valid_scores[-1] - valid_scores[-2]
+        arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "▬")
+        colour = "#34D399" if delta > 0 else ("#F87171" if delta < 0 else "#9CA3AF")
+        delta_txt = (f"<div style='color:{colour}; font-size:0.85rem;'>"
+                     f"{arrow} {abs(delta)}% since last session</div>")
+
     m1, m2, m3, m4 = st.columns(4)
     with m1: st.markdown(f"<div class='premium-card'><small style='color: #9CA3AF;'>Total Interviews</small><h2 style='color:#7C3AED;'>{total_interviews}</h2></div>", unsafe_allow_html=True)
-    with m2: st.markdown(f"<div class='premium-card'><small style='color: #9CA3AF;'>Average Score</small><h2 style='color:#06B6D4;'>{avg_score}%</h2></div>", unsafe_allow_html=True)
+    with m2: st.markdown(f"<div class='premium-card'><small style='color: #9CA3AF;'>Latest Score</small><h2 style='color:#06B6D4;'>{valid_scores[-1] if valid_scores else 0}%</h2>{delta_txt}<small style='color:#6B7280;'>average {avg_score}%</small></div>", unsafe_allow_html=True)
     with m3: st.markdown(f"<div class='premium-card'><small style='color: #9CA3AF;'>CV Status</small><h2 style='color:#34D399;'>{'Analyzed & Uploaded' if st.session_state.cv_uploaded else 'Not uploaded yet'}</h2></div>", unsafe_allow_html=True)
     with m4: st.markdown("<div class='premium-card'><small style='color: #9CA3AF;'>Current Plan</small><h2 style='color:#F59E0B;'>Pro Plan</h2></div>", unsafe_allow_html=True)
 
@@ -850,6 +913,46 @@ def render_dashboard():
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col_right:
+        progress, prog_ok = get_skill_progress(st.session_state.user_id)
+        multi = {k: v for k, v in progress.items() if len(v) >= 2}
+        if prog_ok and multi:
+            improved, declined, stuck = [], [], []
+            for skill, points in multi.items():
+                first, last = points[0][1], points[-1][1]
+                change = (last - first) * 100
+                row = (skill, first * 100, last * 100, change)
+                if change >= 5:
+                    improved.append(row)
+                elif change <= -5:
+                    declined.append(row)
+                elif last < 0.5:
+                    stuck.append(row)
+
+            body = ""
+            for title, group, colour, sign in (
+                ("تحسّنت / Improved", sorted(improved, key=lambda r: -r[3]), "#34D399", "+"),
+                ("تراجعت / Declined", sorted(declined, key=lambda r: r[3]), "#F87171", ""),
+                ("ما زالت ضعيفة / Still weak", stuck, "#FBBF24", ""),
+            ):
+                if not group:
+                    continue
+                body += f"<p style='color:{colour}; margin:8px 0 2px;'><b>{title}</b></p>"
+                for skill, first, last, change in group[:4]:
+                    body += (f"<p style='margin:2px 0; font-size:0.85rem;'>• {skill}: "
+                             f"{first:.0f}% → <b>{last:.0f}%</b> "
+                             f"<span style='color:{colour};'>({sign}{change:.0f}%)</span></p>")
+            st.markdown(
+                f"<div class='premium-card'><h3>📊 Skill Progress</h3>{body}"
+                f"<p style='color:#6B7280; font-size:0.75rem; margin-top:10px;'>"
+                f"Compared across your sessions, first to latest.</p></div>",
+                unsafe_allow_html=True)
+        elif prog_ok and progress:
+            st.markdown(
+                "<div class='premium-card'><h3>📊 Skill Progress</h3>"
+                "<p style='color:#9CA3AF; font-size:0.9rem;'>Complete a second "
+                "interview on the same skills to see how much you improved.</p></div>",
+                unsafe_allow_html=True)
+
         # Recommendations are the evaluator's own feedback on the weakest
         # answers, so they refer to what this candidate actually said rather
         # than to a fixed sentence.
@@ -1313,6 +1416,10 @@ def render_interview():
                 )
                 evaluation = dict(evaluation)
                 evaluation["integrity"] = integrity
+                # Stored with the answer so progress can later be reported per
+                # skill. The column holds only the question text, and matching
+                # a skill back out of that text would be guesswork.
+                evaluation["targets_skill"] = current_q.get("targets_skill", "")
 
                 save_question_answer(st.session_state.current_interview_id,
                                      current_q_text, user_ans,
