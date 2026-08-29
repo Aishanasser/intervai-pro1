@@ -461,8 +461,16 @@ def db_status() -> tuple[bool, str]:
     return False, _DB_ERROR or "unknown error"
 
 def init_db():
+    """Create the schema if it is missing.
+
+    Wrapped because this runs at import time: an unhandled exception here
+    stops the whole app from loading, and a silent skip leaves every later
+    query failing against tables that were never created.
+    """
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        return False
+    try:
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -512,37 +520,69 @@ def init_db():
                 cursor.execute(f"ALTER TABLE interview_qa {ddl}")
 
         conn.commit()
-        cursor.close()
-        conn.close()
+        return True
+    except Error as e:
+        # Surfaced rather than swallowed: without the schema nothing works, and
+        # the cause (permissions, wrong database name) belongs on screen.
+        st.error(f"⚠️ Could not create the database schema: {e}")
+        return False
+    finally:
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
 
 # Auto-create/repair tables on startup
 init_db()
 
 def create_user(name, email, password):
+    """Returns (ok, reason). `reason` distinguishes a duplicate email from a
+    database failure — returning a bare False for both told a user whose
+    database was down that their email was already taken, which is a
+    misleading message and sends them to fix the wrong thing."""
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        return False, "unavailable"
+    try:
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO users (name, email, password) VALUES (%s, %s, %s)',
+                       (name, email, password))
+        conn.commit()
+        return True, "created"
+    except mysql.connector.IntegrityError:
+        return False, "duplicate"
+    except Error:
+        return False, "unavailable"
+    finally:
         try:
-            cursor = conn.cursor()
-            cursor.execute('INSERT INTO users (name, email, password) VALUES (%s, %s, %s)', (name, email, password))
-            conn.commit()
-            return True
-        except mysql.connector.IntegrityError:
-            return False
-        finally:
-            cursor.close()
-            conn.close()
-    return False
+            cursor.close(); conn.close()
+        except Exception:
+            pass
 
 def authenticate_user(email, password):
+    """Returns (user_id, name) on success, None on wrong credentials, and the
+    string "unavailable" when the database could not be reached.
+
+    The three cases used to collapse into a bare None, so a user whose database
+    was down was told their email or password was wrong — sending them to
+    change a password that was never the problem.
+    """
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        return "unavailable"
+    try:
         cursor = conn.cursor()
-        cursor.execute('SELECT id, name FROM users WHERE email=%s AND password=%s', (email, password))
+        cursor.execute('SELECT id, name FROM users WHERE email=%s AND password=%s',
+                       (email, password))
         result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        if result: return result[0], result[1]
-    return None
+        return (result[0], result[1]) if result else None
+    except Error:
+        return "unavailable"
+    finally:
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
 
 def create_interview_session(user_id, job_title, exp_level, job_desc):
     conn = get_db_connection()
@@ -593,27 +633,64 @@ def save_question_answer(interview_id, question_text, user_answer,
             pass
 
 def finalize_interview(interview_id, score, evaluation_text):
+    """Write the final score. Returns True on success.
+
+    This had neither an error branch nor a try block: if the database was
+    unreachable the update was skipped in silence, so the candidate saw a score
+    on screen while the stored row kept its default of 0. For a study whose
+    only output is the stored rows, a score that exists on screen and nowhere
+    else is worse than no score at all.
+    """
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        st.error("⚠️ Could not save your final score — database unreachable "
+                 f"({_DB_ERROR}).")
+        return False
+    try:
         cursor = conn.cursor()
-        cursor.execute('UPDATE interviews SET score = %s, ai_evaluation = %s WHERE id = %s', (score, evaluation_text, interview_id))
+        cursor.execute(
+            'UPDATE interviews SET score = %s, ai_evaluation = %s WHERE id = %s',
+            (score, evaluation_text, interview_id))
         conn.commit()
-        cursor.close()
-        conn.close()
+        if cursor.rowcount == 0:
+            # The update ran but matched nothing — a wrong or deleted id.
+            st.warning(f"⚠️ No interview row #{interview_id} was updated.")
+            return False
+        return True
+    except Error as e:
+        st.error(f"⚠️ Could not save your final score: {e}")
+        return False
+    finally:
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
 
 def get_user_interview_history(user_id):
+    """Returns (rows, ok). `ok` is False when the database could not be read.
+
+    An empty list used to mean both "this user has no interviews" and "the
+    database is down". The dashboard then displayed a confident zero for
+    someone who might have ten sessions stored — a wrong number is worse than
+    a visible error.
+    """
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        return [], False
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            'SELECT id, job_title, experience_level, score, ai_evaluation, '
+            'session_date FROM interviews WHERE user_id=%s ORDER BY session_date ASC',
+            (user_id,))
+        return cursor.fetchall(), True
+    except Error:
+        return [], False
+    finally:
         try:
-            cursor = conn.cursor(dictionary=True)
-            cursor.execute('SELECT id, job_title, experience_level, score, ai_evaluation, session_date FROM interviews WHERE user_id=%s ORDER BY session_date ASC', (user_id,))
-            return cursor.fetchall()
-        except Error:
-            return []
-        finally:
-            cursor.close()
-            conn.close()
-    return []
+            cursor.close(); conn.close()
+        except Exception:
+            pass
 
 
 if "page" not in st.session_state: st.session_state.page = "Landing"
@@ -703,13 +780,19 @@ def render_auth():
         password = st.text_input("Password", type="password", key="login_pass")
         if st.button("Log In", key="btn_login_submit"):
             res = authenticate_user(email, password)
-            if res:
+            if res == "unavailable":
+                # Told apart from wrong credentials on purpose: the old message
+                # covered both, so a user whose database was down went off to
+                # reset a password that was never wrong.
+                st.error("⚠️ Could not reach the database. This is not a problem "
+                         "with your password — please try again shortly.")
+            elif res:
                 st.session_state.is_logged_in = True
                 st.session_state.user_id, st.session_state.user_name = res[0], res[1]
                 st.toast("Logged in successfully! 🎉")
                 navigate_to("Dashboard")
             else:
-                st.error("Invalid login credentials, or the server is not connected.")
+                st.error("Invalid email or password.")
 
     with tab2:
         new_name = st.text_input("Full Name", key="reg_name")
@@ -717,10 +800,16 @@ def render_auth():
         new_password = st.text_input("Password", type="password", key="reg_pass")
         if st.button("Create Account", key="btn_reg_submit"):
             if new_name and new_email and new_password:
-                if create_user(new_name, new_email, new_password):
+                ok, reason = create_user(new_name, new_email, new_password)
+                if ok:
                     st.success("Account created successfully! Switch to the Login tab now.")
-                else:
+                elif reason == "duplicate":
                     st.error("This email is already registered.")
+                else:
+                    # Not the user's fault, and not something they can fix by
+                    # trying another email — say so instead of blaming them.
+                    st.error("⚠️ Could not reach the database. Your account was "
+                             "NOT created. Please try again shortly.")
             else:
                 st.error("Please fill in all the fields.")
 
@@ -732,7 +821,10 @@ def render_auth():
 def render_dashboard():
     st.markdown(f"<h1 class='gradient-text'>Strategic Dashboard | Welcome, {st.session_state.user_name} 👋</h1>", unsafe_allow_html=True)
 
-    history = get_user_interview_history(st.session_state.user_id)
+    history, history_ok = get_user_interview_history(st.session_state.user_id)
+    if not history_ok:
+        st.warning("⚠️ Could not read your history — the figures below are not "
+                   "your real data.")
     total_interviews = len(history)
     valid_scores = [item['score'] for item in history if item.get('score') is not None]
     avg_score = int(sum(valid_scores) / len(valid_scores)) if len(valid_scores) > 0 else 0
@@ -785,6 +877,157 @@ def _rtl(text: str) -> str:
     if st.session_state.get("interview_language") != "ar":
         return text
     return f"<span class='rtl' style='display:block;'>{text}</span>"
+
+
+# Snippets the toolbar inserts. Each is a Markdown construct the preview and
+# the final report both render, so what the candidate formats is what everyone
+# later reads.
+# ==========================================
+#  Answer integrity
+# ==========================================
+# Two independent signals, deliberately of different kinds.
+#
+# 1. Typing rate — measured on the SERVER from the moment the question is
+#    rendered to the moment the answer is submitted. It cannot be faked from
+#    the browser, and it is decisive: the world record for sustained copy
+#    typing is about 212 wpm, while composing an answer while thinking rarely
+#    exceeds 40-60. A 500-word answer submitted in 15 seconds is 2000 wpm,
+#    which is not a fast typist.
+#
+# 2. Focus loss — counted in the browser. Weaker evidence (a notification can
+#    steal focus innocently) and defeatable by a second device, so it is
+#    reported as context rather than used as proof. Its real value is
+#    deterrence: candidates are told it is recorded.
+_WPM_SUSPICIOUS = 120      # above careful composition, still humanly possible
+_WPM_IMPOSSIBLE = 200      # past the sustained human record — pasted
+_MIN_WORDS_TO_JUDGE = 40   # short answers give too little signal to rate
+
+
+def _integrity_check(text: str, seconds: float, focus_losses: int) -> dict:
+    """Score how plausible it is that this answer was actually typed here."""
+    words = len(text.split())
+    wpm = (words / (seconds / 60)) if seconds > 0 else 0.0
+
+    if words < _MIN_WORDS_TO_JUDGE:
+        verdict = "too_short_to_judge"
+    elif wpm >= _WPM_IMPOSSIBLE:
+        verdict = "pasted"
+    elif wpm >= _WPM_SUSPICIOUS:
+        verdict = "suspicious"
+    else:
+        verdict = "plausible"
+
+    return {
+        "seconds": round(seconds, 1),
+        "words": words,
+        "wpm": round(wpm),
+        "focus_losses": focus_losses,
+        "verdict": verdict,
+    }
+
+
+def _focus_tracker(idx: int) -> None:
+    """Count how many times the candidate leaves this tab.
+
+    Streamlit's components.html runs in a sandboxed iframe with no channel
+    back to Python, so the count is written into the parent page's query
+    string; the next rerun — which the submit button causes — reads it. Best
+    effort by nature: it cannot see a second screen or a phone, which is
+    exactly why the typing rate above carries the real weight.
+    """
+    components.html(
+        f"""<script>
+        (function () {{
+          const doc = window.parent.document;
+          const KEY = 'focus_lost_{idx}';
+          if (doc.__introTracker === KEY) return;   // Streamlit re-runs constantly
+          doc.__introTracker = KEY;
+          let lost = 0;
+          const push = () => {{
+            const u = new URL(window.parent.location);
+            u.searchParams.set('fl', lost);
+            window.parent.history.replaceState({{}}, '', u);
+          }};
+          window.parent.addEventListener('blur', () => {{ lost++; push(); }});
+          doc.addEventListener('visibilitychange', () => {{
+            if (doc.hidden) {{ lost++; push(); }}
+          }});
+        }})();
+        </script>""",
+        height=0,
+    )
+
+
+_EDITOR_SNIPPETS = [
+    ("**B**", "**نص غليظ**", "**bold text**", "غليظ / bold"),
+    ("*I*", "*نص مائل*", "*italic text*", "مائل / italic"),
+    ("`</>`", "`كود`", "`code`", "كود قصير / inline code"),
+    ("▤", "\n```python\nprint('hello')\n```\n", "\n```python\nprint('hello')\n```\n",
+     "كتلة كود / code block"),
+    ("•", "\n- عنصر أول\n- عنصر ثانٍ\n", "\n- first point\n- second point\n",
+     "نقاط / bullets"),
+    ("1.", "\n1. الخطوة الأولى\n2. الخطوة الثانية\n",
+     "\n1. first step\n2. second step\n", "ترقيم / numbered"),
+]
+
+
+def _answer_editor(label: str, idx: int) -> str:
+    """A formatting-aware answer box.
+
+    Streamlit's text_area is plain text and gives no access to the caret, so a
+    true WYSIWYG toolbar is not possible without a third-party component — and
+    those are heavy, which matters on a 1 GB deployment. Instead the toolbar
+    appends Markdown snippets the candidate then edits, and a live preview
+    shows exactly how the answer will be rendered.
+
+    The buttons must run BEFORE the text_area is created: Streamlit forbids
+    writing to a widget's session_state key after that widget exists in the
+    same run.
+    """
+    key = f"ans_{idx}"
+    st.session_state.setdefault(key, "")
+    is_ar = st.session_state.interview_language == "ar"
+
+    # The clock starts when the question first appears, not when typing starts:
+    # the gap between the two is thinking time, which is exactly what a pasted
+    # answer skips.
+    st.session_state.setdefault(f"t0_{idx}", time.time())
+    _focus_tracker(idx)
+
+    cols = st.columns(len(_EDITOR_SNIPPETS) + 1)
+    for col, (face, ar_text, en_text, tip) in zip(cols, _EDITOR_SNIPPETS):
+        if col.button(face, key=f"tb_{idx}_{face}", help=tip,
+                      use_container_width=True):
+            snippet = ar_text if is_ar else en_text
+            current = st.session_state[key]
+            joiner = "" if (not current or current.endswith(("\n", " "))) else " "
+            st.session_state[key] = current + joiner + snippet
+            st.rerun()
+
+    show_preview = cols[-1].toggle("👁", key=f"pv_{idx}",
+                                   help="معاينة / preview")
+
+    text = st.text_area(label, key=key, height=160,
+                        placeholder=("يمكنك استخدام **غليظ** و `كود` و - نقاط"
+                                     if is_ar else
+                                     "You can use **bold**, `code` and - bullets"))
+
+    if show_preview and text.strip():
+        st.caption("المعاينة / Preview")
+        st.markdown(_rtl(text) if is_ar else text, unsafe_allow_html=is_ar)
+
+    elapsed = time.time() - st.session_state[f"t0_{idx}"]
+    words = len(text.split())
+    mins, secs = divmod(int(elapsed), 60)
+    # Stated openly. A hidden check is surveillance; a declared one is a rule,
+    # and telling candidates it exists is most of its deterrent value.
+    st.caption(
+        f"⏱️ {mins}:{secs:02d}  ·  {words} "
+        + ("كلمة  ·  الوقت وتبديل النوافذ مُسجَّلان لضمان نزاهة التدريب"
+           if is_ar else
+           "words  ·  time and tab switches are recorded for training integrity")
+    )
+    return text
 
 
 def _reset_interview_state():
@@ -969,7 +1212,8 @@ def render_upload():
                     st.toast("Session and engine built successfully! 🚀")
                     navigate_to("Interview Engine")
                 else:
-                    st.error("Database connection error. Make sure XAMPP is running.")
+                    st.error(f"⚠️ Could not create the interview session — "
+                             f"database unreachable ({_DB_ERROR}). Nothing was saved.")
     st.markdown("</div>", unsafe_allow_html=True)
 
 def render_db_badge():
@@ -1033,7 +1277,7 @@ def render_interview():
             answer_label = ("اكتب إجابتك الكاملة هنا:"
                             if st.session_state.interview_language == "ar"
                             else "Enter your full answer here:")
-            user_ans = st.text_area(answer_label, key=f"ans_{curr_idx}", height=120)
+            user_ans = _answer_editor(answer_label, curr_idx)
 
             def _process_answer():
                 """Evaluate the answer, then let the agent decide what comes next.
@@ -1061,6 +1305,15 @@ def render_interview():
                 score = evaluation.get("final_score")
                 feedback = evaluation.get("feedback", "")
 
+                # Measured before anything else touches the clock.
+                integrity = _integrity_check(
+                    user_ans,
+                    time.time() - st.session_state.get(f"t0_{curr_idx}", time.time()),
+                    int(st.query_params.get("fl", 0) or 0),
+                )
+                evaluation = dict(evaluation)
+                evaluation["integrity"] = integrity
+
                 save_question_answer(st.session_state.current_interview_id,
                                      current_q_text, user_ans,
                                      score=score, evaluation=evaluation)
@@ -1074,6 +1327,7 @@ def render_interview():
                     "reason": cycle.get("reason", ""),
                     "thought": cycle.get("thought", ""),
                     "used_fallback": cycle.get("used_fallback"),
+                    "integrity": integrity,
                 })
                 if "error" not in cycle:
                     st.session_state.interview_evaluations.append(evaluation)
@@ -1190,12 +1444,32 @@ def render_interview():
                         st.markdown(
                             f"<b>Q{i}.</b>{score_txt}{_rtl(item['question'])}",
                             unsafe_allow_html=True)
-                        st.markdown(
-                            f"<span style='color:#9CA3AF;'>"
-                            f"{_rtl(item['answer'] or '(no answer given)')}</span>",
-                            unsafe_allow_html=True)
+                        # Rendered as Markdown, not escaped: the candidate may
+                        # have formatted the answer with the editor toolbar, and
+                        # showing raw ** and ` symbols in the report would make
+                        # a well-structured answer look worse than a plain one.
+                        answer_md = item["answer"] or "_(no answer given)_"
+                        if st.session_state.interview_language == "ar":
+                            st.markdown(f"<div class='rtl'>", unsafe_allow_html=True)
+                            st.markdown(answer_md)
+                            st.markdown("</div>", unsafe_allow_html=True)
+                        else:
+                            st.markdown(answer_md)
                         if item.get("feedback"):
                             st.markdown(f"💬 {_rtl(item['feedback'])}", unsafe_allow_html=True)
+
+                        ig = item.get("integrity") or {}
+                        if ig:
+                            icon = {"pasted": "🔴", "suspicious": "🟠",
+                                    "plausible": "🟢"}.get(ig["verdict"], "⚪")
+                            note = ""
+                            if ig["verdict"] == "pasted":
+                                note = " — faster than any human types; this answer was pasted"
+                            elif ig["verdict"] == "suspicious":
+                                note = " — unusually fast for composed writing"
+                            st.caption(
+                                f"{icon} {ig['seconds']}s · {ig['words']} words · "
+                                f"{ig['wpm']} wpm · left the tab {ig['focus_losses']}×{note}")
                         if item.get("thought"):
                             # The agent's written reasoning is what makes an
                             # adaptive decision auditable instead of silent.

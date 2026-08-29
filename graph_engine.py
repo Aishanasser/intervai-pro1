@@ -40,6 +40,7 @@ from ai_engine import (
     AGENT_SYSTEM_PROMPT,
     MAX_PROBE_DEPTH,
     MAX_OFF_PLAN_QUESTIONS,
+    MAX_TOTAL_QUESTIONS,
     ANSWER_WEAK_THRESHOLD,
     ANSWER_STRONG_THRESHOLD,
 )
@@ -393,6 +394,33 @@ def run_answer_cycle(question: dict, answer: str, cv_skills: dict,
     if used_fallback:
         decision = _fallback_route(evaluation, ctx["probe_depth"])
 
+    # --- budget enforcement ------------------------------------------------
+    # The limits were stated to the agent in its briefing and nowhere else, so
+    # they were a request rather than a rule: a real interview ran to 13
+    # questions against a stated ceiling of 12, because nothing in the code
+    # ever checked. An adaptive interview that can extend itself needs a stop
+    # that does not depend on the model choosing to obey.
+    #
+    # Enforced after the decision rather than before it, so the agent's own
+    # reasoning is still recorded — the report then shows both what it wanted
+    # to do and why it was not allowed to.
+    budget_note = None
+    if decision["route"] == "probe" and ctx["probe_depth"] >= MAX_PROBE_DEPTH:
+        budget_note = (f"probe budget exhausted "
+                       f"({ctx['probe_depth']}/{MAX_PROBE_DEPTH} on this skill)")
+    elif (decision["route"] == "ask_about_skill"
+          and ctx["off_plan_used"] >= MAX_OFF_PLAN_QUESTIONS):
+        budget_note = (f"off-plan budget exhausted "
+                       f"({ctx['off_plan_used']}/{MAX_OFF_PLAN_QUESTIONS})")
+    elif (decision["route"] in ("probe", "ask_about_skill")
+          and ctx["asked_count"] >= MAX_TOTAL_QUESTIONS):
+        budget_note = (f"interview length ceiling reached "
+                       f"({ctx['asked_count']}/{MAX_TOTAL_QUESTIONS} asked)")
+
+    if budget_note:
+        decision = {"route": "next",
+                    "reason": f"[budget] {decision['reason']} — overridden: {budget_note}"}
+
     # Dynamically generated questions clear the SAME Answerability gate as the
     # planned ones; if none does, the caller falls back to the planned queue.
     new_question = None
@@ -422,6 +450,7 @@ def run_answer_cycle(question: dict, answer: str, cv_skills: dict,
         "thought": thought,
         "new_question": new_question,
         "used_fallback": used_fallback,
+        "budget_capped": budget_note is not None,
         "tool_calls": tool_calls,
     }
 

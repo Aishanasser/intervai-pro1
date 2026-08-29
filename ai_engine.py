@@ -14,7 +14,18 @@ load_dotenv()
 # ==========================================
 FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY")
 FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
-MODEL_NAME = "accounts/fireworks/models/deepseek-v4-pro"
+# Pinned to the dated snapshot, not the rolling alias.
+#
+# The alias `deepseek-v4-pro` started returning 404 ("Model not found,
+# inaccessible, and/or not deployed") mid-project while still being listed by
+# the /models endpoint — the whole platform stopped working with no code
+# change on our side. The dated build serves the same model and was the
+# fastest of the alternatives measured (3.1s vs 25-30s for kimi-k2p6 and
+# deepseek-v4-flash).
+#
+# Pinning also matters for the evaluation itself: an F1 figure is only
+# reproducible if the model behind it cannot be swapped underneath the name.
+MODEL_NAME = "accounts/fireworks/models/deepseek-v4-pro-0813"
 
 if not FIREWORKS_API_KEY:
     raise RuntimeError(
@@ -806,7 +817,11 @@ def _target_is_named(question_text: str, targets_skill: str,
     """
     text = question_text.lower()
 
-    candidates = [targets_skill] + re.split(r"[/,()]", targets_skill)
+    # The dot is a separator here as well as the slash and comma. Without it a
+    # target of "React.js" is searched for as one literal token and never
+    # matches an answer that says "React", which cost four substantive answers
+    # (126-476 words each) a score of zero on a real interview.
+    candidates = [targets_skill] + re.split(r"[/,().]", targets_skill)
     for candidate in candidates:
         candidate = candidate.strip().lower()
         if candidate and _word_boundary_search(candidate, text):
@@ -815,7 +830,7 @@ def _target_is_named(question_text: str, targets_skill: str,
     # An Arabic label carries Arabic filler ("مهارات", "خبرة في") as well as
     # English, and a mixed label like "إدارة قواعد بيانات SQL" contains both.
     stopwords = set(_TARGET_STOPWORDS) | set(_lex(language, "target_stopwords"))
-    for word in re.split(r"[\s/,()]+", targets_skill.lower()):
+    for word in re.split(r"[\s/,().\-]+", targets_skill.lower()):
         word = word.strip()
         if len(word) >= 3 and word not in stopwords and _word_boundary_search(word, text):
             return True
@@ -1430,19 +1445,31 @@ def evaluate_answer(question: str, answer: str, targets_skill: str,
     substance = _score_substance(answer)
     filler_count, filler_penalty = _score_filler_penalty(answer, language)
 
-    # Requiring the answer to name its target skill is right for a technical
-    # question — an answer about Kubernetes that never mentions Kubernetes has
-    # not engaged the topic. It is WRONG for a behavioural one: a good STAR
-    # answer to a leadership question recounts an episode and may never utter
-    # the word "leadership". Applying the technical gate there would score
-    # honest, well-structured personal stories 0.0. Whether the episode is on
-    # topic is judged instead by "relevance" in the STAR rubric.
+    # Reported, but no longer decisive.
+    #
+    # This used to be a kill switch: an answer that did not literally contain
+    # its target skill scored 0 without the evaluator ever being called. That
+    # is a bad proxy for "engaged with the topic", and it failed on real
+    # interviews — four answers of 126 to 476 words were zeroed, including a
+    # detailed account of prioritising a mid-sprint request that simply never
+    # used the word "Agile", and a React explanation that said "React" where
+    # the skill label read "React.js".
+    #
+    # Whether an answer is on topic is a semantic judgement, and the rubric
+    # already has the right instrument for it: `relevance`, judged by the model.
+    # An off-topic answer now scores low through that path (relevance near 0
+    # drags the weighted total down) instead of being silently zeroed by a
+    # string comparison. The cost is one model call on answers that would
+    # previously have been rejected for free — correctness is worth more than
+    # that call.
     skill_addressed = (None if is_soft_skill
                        else (_target_is_named(answer, targets_skill, language)
                              if answer else False))
 
     # --- deterministic short-circuit -------------------------------------
-    if substance == 0.0 or skill_addressed is False:
+    # Only the genuinely degenerate case: no answer at all. "222" or an empty
+    # box needs no model to judge it, and cannot be flattered by one.
+    if substance == 0.0:
         return {
             "final_score": 0.0,
             "is_soft_skill": is_soft_skill,
