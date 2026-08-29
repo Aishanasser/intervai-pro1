@@ -1208,7 +1208,11 @@ def render_interview():
                                 unsafe_allow_html=True)
                         st.markdown("---")
 
-        
+
+            # The planned set, not the live queue: this panel reports on
+            # question *generation*, so it must show what the generator
+            # produced rather than what the agent later inserted or dropped.
+            generated = st.session_state.generated_questions
             if generated:
                 passed = sum(1 for q in generated if q.get("passes_gate"))
                 gap_qs = sum(1 for q in generated if q.get("is_gap_skill"))
