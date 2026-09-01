@@ -10,7 +10,8 @@ import pandas as pd
 
 load_dotenv()
 from pypdf import PdfReader
-from ai_engine import extract_skills, normalize_text, detect_language
+from ai_engine import (extract_skills, normalize_text, detect_language,
+                       ANSWER_WEAK_THRESHOLD, ANSWER_STRONG_THRESHOLD)
 from graph_engine import run_cv_jd_pipeline, run_answer_cycle
 
 st.set_page_config(
@@ -1111,6 +1112,23 @@ def _rtl(text: str) -> str:
     return f"<span class='rtl' style='display:block;'>{text}</span>"
 
 
+def _skill_verdict(avg: float) -> tuple:
+    """Colour and wording for one skill in the final report.
+
+    The two cut-offs are imported from ai_engine rather than chosen here, and
+    they are the same ones the agent routes on during the interview: below
+    ANSWER_WEAK_THRESHOLD it abandons the skill, above ANSWER_STRONG_THRESHOLD
+    it probes deeper. Reusing them means the report cannot call a skill
+    "solid" that the agent walked away from mid-interview — the candidate
+    reads the same judgement the system acted on.
+    """
+    if avg < ANSWER_WEAK_THRESHOLD:
+        return _c_red, "weak — needs work"
+    if avg > ANSWER_STRONG_THRESHOLD:
+        return _c_green, "strong"
+    return _c_yellow, "adequate"
+
+
 # Snippets the toolbar inserts. Each is a Markdown construct the preview and
 # the final report both render, so what the candidate formats is what everyone
 # later reads.
@@ -1682,12 +1700,57 @@ def render_interview():
                 rows = sorted(((s, sum(v) / len(v)) for s, v in by_skill.items()),
                               key=lambda x: x[1])
                 body = "".join(
-                    f"<p><b>• {skill}:</b> {avg * 100:.0f}%</p>" for skill, avg in rows
+                    "<p><b>• {}:</b> {:.0f}% &nbsp;<span style='color:{};"
+                    "font-size:0.85rem;'>{}</span></p>".format(
+                        skill, avg * 100, *_skill_verdict(avg))
+                    for skill, avg in rows
                 ) or f"<p style='color:{_muted};'>No answers were evaluated.</p>"
                 st.markdown(
                     f"<div class='premium-card'><h4>Skill Breakdown "
                     f"<span style='color:{_muted}; font-size:0.8rem;'>(weakest first)</span></h4>"
                     f"{body}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # --- what to work on next ------------------------------------
+            # The evaluator already wrote feedback on every answer, but it sat
+            # inside the collapsed transcript below: advice nobody opens is
+            # advice nobody reads. This lifts it out for the skills that did
+            # not reach the strong threshold, worst first, quoting the
+            # evaluator on the weakest answer for each skill rather than
+            # inventing generic study tips.
+            worst_answer = {}
+            for a in answers:
+                skill = a.get("targets_skill") or "general"
+                if not a.get("feedback") or not isinstance(a.get("score"), (int, float)):
+                    continue
+                if skill not in worst_answer or a["score"] < worst_answer[skill]["score"]:
+                    worst_answer[skill] = a
+            todo = [(skill, avg) for skill, avg in rows
+                    if avg <= ANSWER_STRONG_THRESHOLD and skill in worst_answer][:4]
+            if todo:
+                items = ""
+                for skill, avg in todo:
+                    colour, label = _skill_verdict(avg)
+                    items += (
+                        f"<p style='margin:14px 0 4px;'><b>• {skill}</b> "
+                        f"<span style='color:{colour}; font-size:0.85rem;'>"
+                        f"{avg * 100:.0f}% {label}</span></p>"
+                        f"<p style='color:{_muted}; font-size:0.9rem; "
+                        f"margin:0 0 0 14px;'>{_rtl(worst_answer[skill]['feedback'])}</p>")
+                st.markdown(
+                    f"<div class='premium-card'><h4>🎯 What to work on next "
+                    f"<span style='color:{_muted}; font-size:0.8rem;'>"
+                    f"(the evaluator's own notes on your weakest answer per skill)"
+                    f"</span></h4>{items}</div>",
+                    unsafe_allow_html=True,
+                )
+            elif rows:
+                st.markdown(
+                    f"<div class='premium-card'><h4>🎯 What to work on next</h4>"
+                    f"<p style='color:{_muted};'>Every skill tested came out above "
+                    f"{ANSWER_STRONG_THRESHOLD * 100:.0f}% — nothing stood out as "
+                    f"needing work in this session.</p></div>",
                     unsafe_allow_html=True,
                 )
 
