@@ -617,7 +617,7 @@ def init_db():
                 job_title VARCHAR(255) NOT NULL,
                 experience_level VARCHAR(100),
                 job_description TEXT,
-                score INT DEFAULT 0,
+                score INT DEFAULT NULL,
                 ai_evaluation TEXT,
                 session_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -648,6 +648,35 @@ def init_db():
                             ("evaluation_json", "ADD COLUMN evaluation_json TEXT NULL")):
             if column not in existing:
                 cursor.execute(f"ALTER TABLE interview_qa {ddl}")
+
+        # interviews.score was created as DEFAULT 0, which makes an interview
+        # that was never finished indistinguishable from one genuinely scored
+        # zero. The dashboard filters on `score is not None`, so a walked-away
+        # session was being counted as a real 0% — dragging the candidate's
+        # average down and showing "declining" on the progress panel. NULL is
+        # the only value that means "no score yet".
+        cursor.execute('''
+            SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'interviews'
+              AND COLUMN_NAME = 'score'
+        ''', (DB_CONFIG["database"],))
+        row = cursor.fetchone()
+        if row and row[0] is not None:
+            cursor.execute("ALTER TABLE interviews ALTER COLUMN score DROP DEFAULT")
+
+        # Resume support. Everything an in-progress interview needs lives in
+        # st.session_state, which is per browser session and is wiped by a
+        # logout, a refresh, or the host putting the app to sleep. The answers
+        # were already durable — each one is written as it is submitted — but
+        # the question queue and the agent's budget counters were not, so a
+        # candidate who dropped out could only start over. This column holds
+        # them as JSON, and is cleared when the interview is finalised.
+        cursor.execute("""
+            SELECT COLUMN_NAME FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'interviews'
+        """, (DB_CONFIG["database"],))
+        if "resume_json" not in {r[0] for r in cursor.fetchall()}:
+            cursor.execute("ALTER TABLE interviews ADD COLUMN resume_json MEDIUMTEXT NULL")
 
         conn.commit()
         return True
@@ -719,7 +748,9 @@ def create_interview_session(user_id, job_title, exp_level, job_desc):
     if conn:
         try:
             cursor = conn.cursor()
-            cursor.execute('INSERT INTO interviews (user_id, job_title, experience_level, job_description) VALUES (%s, %s, %s, %s)', (user_id, job_title, exp_level, job_desc))
+            # score stays NULL until the interview is finished: see the
+            # migration note in init_db().
+            cursor.execute('INSERT INTO interviews (user_id, job_title, experience_level, job_description, score) VALUES (%s, %s, %s, %s, NULL)', (user_id, job_title, exp_level, job_desc))
             conn.commit()
             return cursor.lastrowid
         except Error:
@@ -762,6 +793,73 @@ def save_question_answer(interview_id, question_text, user_answer,
         except Exception:
             pass
 
+# Fields that together describe "where this interview had got to". Answers
+# are NOT among them — those are already rows in interview_qa — but the
+# evaluations are, because the final report averages them and re-reading them
+# out of the answer rows would mean re-parsing JSON that is already in memory.
+_RESUME_FIELDS = (
+    "interview_queue", "current_question", "interview_answers",
+    "interview_evaluations", "covered_skills", "probe_depth", "off_plan_used",
+    "generated_questions", "skill_gap", "jd_skills", "cv_skills",
+    "interview_language", "mock_questions",
+)
+
+
+def save_interview_progress(interview_id) -> None:
+    """Snapshot the live interview so it can be picked up later.
+
+    Best effort by design: this runs after every answer, and a failure here
+    must not cost the candidate the answer they just submitted — that is
+    already stored by save_question_answer(). So it stays silent, and the
+    worst case is the interview being non-resumable, which is where it was
+    before this existed.
+    """
+    if not interview_id:
+        return
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        payload = json.dumps({f: st.session_state.get(f) for f in _RESUME_FIELDS},
+                             ensure_ascii=False, default=str)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE interviews SET resume_json = %s WHERE id = %s",
+                       (payload, interview_id))
+        conn.commit()
+    except (Error, TypeError, ValueError):
+        pass
+    finally:
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
+
+
+def load_unfinished_interview(user_id):
+    """Newest interview for this user that was never finished and has a
+    snapshot. Returns (row, state) or (None, None)."""
+    conn = get_db_connection()
+    if not conn:
+        return None, None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT id, job_title, session_date, resume_json FROM interviews "
+            "WHERE user_id = %s AND score IS NULL AND resume_json IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None, None
+        return row, json.loads(row["resume_json"])
+    except (Error, ValueError, TypeError):
+        return None, None
+    finally:
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
+
+
 def finalize_interview(interview_id, score, evaluation_text):
     """Write the final score. Returns True on success.
 
@@ -778,8 +876,11 @@ def finalize_interview(interview_id, score, evaluation_text):
         return False
     try:
         cursor = conn.cursor()
+        # resume_json is cleared here: a finished interview must not show up
+        # as resumable on the next login.
         cursor.execute(
-            'UPDATE interviews SET score = %s, ai_evaluation = %s WHERE id = %s',
+            'UPDATE interviews SET score = %s, ai_evaluation = %s, '
+            'resume_json = NULL WHERE id = %s',
             (score, evaluation_text, interview_id))
         conn.commit()
         if cursor.rowcount == 0:
@@ -846,6 +947,60 @@ def get_skill_progress(user_id):
         for skill, scores in skills.items():
             progress.setdefault(skill, []).append((when, sum(scores) / len(scores)))
     return progress, True
+
+
+def get_weakest_answers(user_id, limit=3):
+    """The weakest answers from this user's most recent interview.
+
+    Read from the database rather than from session state. The dashboard used
+    st.session_state.interview_answers, which is populated only while an
+    interview is running in the current browser session — so anyone who
+    finished an interview and logged back in later was told to "complete an
+    interview to see recommendations", with a full set of stored evaluations
+    sitting in the database the whole time.
+
+    Scoped to the latest interview because advice should describe where the
+    candidate stands now, not repeat a weakness from months ago they may
+    already have fixed.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return [], False
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT a.score, a.evaluation_json
+            FROM interview_qa a
+            WHERE a.interview_id = (
+                SELECT i.id FROM interviews i
+                JOIN interview_qa qa ON qa.interview_id = i.id
+                WHERE i.user_id = %s AND qa.score IS NOT NULL
+                ORDER BY i.session_date DESC, i.id DESC LIMIT 1
+            ) AND a.score IS NOT NULL
+            ORDER BY a.score ASC LIMIT %s
+        """, (user_id, limit))
+        rows = cursor.fetchall()
+    except Error:
+        return [], False
+    finally:
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
+
+    out = []
+    for r in rows:
+        ev = {}
+        if r.get("evaluation_json"):
+            try:
+                ev = json.loads(r["evaluation_json"])
+            except (ValueError, TypeError):
+                ev = {}
+        if ev.get("feedback"):
+            out.append({"score": r["score"],
+                        "targets_skill": ev.get("targets_skill") or "General",
+                        "feedback": ev["feedback"]})
+    return out, True
 
 
 def get_user_interview_history(user_id):
@@ -1085,14 +1240,23 @@ def render_dashboard():
 
         # Recommendations are the evaluator's own feedback on the weakest
         # answers, so they refer to what this candidate actually said rather
-        # than to a fixed sentence.
+        # than to a fixed sentence. Session state is preferred only while an
+        # interview is actually running in this tab, since it holds answers
+        # not yet written; otherwise the stored evaluations are read back, so
+        # the advice survives logging out.
         rated = [a for a in st.session_state.interview_answers
                  if isinstance(a.get("score"), (int, float)) and a.get("feedback")]
+        rec_ok = True
+        if not rated:
+            rated, rec_ok = get_weakest_answers(st.session_state.user_id)
         weakest = sorted(rated, key=lambda a: a["score"])[:3]
         if weakest:
             items = "<br><br>".join(
                 f"• <b>{a.get('targets_skill') or 'General'}</b> "
                 f"({a['score'] * 100:.0f}%) — {a['feedback']}" for a in weakest)
+        elif not rec_ok:
+            items = ("Could not read your past evaluations — the database is "
+                     "unreachable right now.")
         else:
             items = "Complete an interview to see recommendations based on your own answers."
         st.markdown(
@@ -1478,6 +1642,9 @@ def render_upload():
                     st.session_state.current_question = 0
                     st.session_state.interview_answers = []
                     _reset_interview_state()
+                    st.session_state.interview_queue = [
+                        dict(q) for q in st.session_state.generated_questions]
+                    save_interview_progress(int_id)
                     st.toast("Session and engine built successfully! 🚀")
                     navigate_to("Interview Engine")
                 else:
@@ -1513,6 +1680,38 @@ def render_interview():
             unsafe_allow_html=True)
 
     if not st.session_state.interview_started or st.session_state.current_interview_id is None:
+        # This is where a candidate lands after logging back in, so it is where
+        # an interrupted interview has to be offered back to them. Anything
+        # that clears session_state — a logout, a browser refresh, the host
+        # putting the app to sleep — brings them here mid-interview.
+        pending_row, pending_state = load_unfinished_interview(st.session_state.user_id)
+        if pending_row and pending_state:
+            answered = len(pending_state.get("interview_answers") or [])
+            total = len(pending_state.get("interview_queue") or [])
+            st.markdown(
+                f"<div class='premium-card' style='border-left: 4px solid {_c_amber};'>"
+                f"<h3>⏸️ You have an unfinished interview</h3>"
+                f"<p><b>{pending_row['job_title']}</b> — "
+                f"{answered} of {total} questions answered, started "
+                f"{pending_row['session_date']:%d %b %Y at %H:%M}.</p>"
+                f"<p style='color:{_muted}; font-size:0.9rem;'>Your answers were "
+                f"saved as you submitted them. Continuing picks up at the next "
+                f"question; starting fresh leaves this session scored as it "
+                f"stands.</p></div>",
+                unsafe_allow_html=True)
+            resume_col, fresh_col = st.columns(2)
+            with resume_col:
+                if st.button("▶️ Continue where I left off", key="btn_resume"):
+                    for field, value in pending_state.items():
+                        st.session_state[field] = value
+                    st.session_state.current_interview_id = pending_row["id"]
+                    st.session_state.interview_started = True
+                    st.session_state.cv_uploaded = bool(pending_state.get("cv_skills"))
+                    st.rerun()
+            with fresh_col:
+                if st.button("🆕 Start a new interview instead", key="btn_fresh"):
+                    navigate_to("Upload System")
+
         st.markdown("<div class='premium-card' style='text-align: center; padding: 40px;'>", unsafe_allow_html=True)
         st.write("The engine is waiting for data setup from the Upload System page.")
         if st.button("Go to the Upload page now"):
@@ -1628,6 +1827,9 @@ def render_interview():
                             + [q for q in queue[curr_idx + 1:]
                                if q.get("targets_skill") != skill]
                         )
+                # The snapshot goes last, so it records the queue as the
+                # agent has just reshaped it rather than as it was before.
+                save_interview_progress(st.session_state.current_interview_id)
                 return cycle
 
             if not is_last:
