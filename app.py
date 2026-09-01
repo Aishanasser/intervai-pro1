@@ -860,22 +860,43 @@ def load_unfinished_interview(user_id):
             pass
 
 
-def finalize_interview(interview_id, score, evaluation_text):
-    """Write the final score. Returns True on success.
+def finalize_interview(interview_id, evaluation_text):
+    """Average the stored answer rows into the interview's final score.
+
+    Returns the score written (0-100), or None if nothing was written.
 
     This had neither an error branch nor a try block: if the database was
     unreachable the update was skipped in silence, so the candidate saw a score
     on screen while the stored row kept its default of 0. For a study whose
     only output is the stored rows, a score that exists on screen and nowhere
     else is worse than no score at all.
+
+    The score is now computed HERE, from interview_qa, instead of being passed
+    in from st.session_state. The caller used to average a list held in browser
+    session state and fall back to `0` when that list was empty — so a session
+    whose state had been cleared (a refresh, the host sleeping the app) wrote a
+    confident 0 over an interview whose answers were all sitting in the
+    database, correctly scored. One real candidate was recorded at 0% with a
+    true average of 58%. The answer rows are the durable record; averaging them
+    cannot disagree with them, and when there is nothing to average the column
+    is left NULL, which is the only value that means "not scored".
     """
     conn = get_db_connection()
     if not conn:
         st.error("⚠️ Could not save your final score — database unreachable "
                  f"({_DB_ERROR}).")
-        return False
+        return None
     try:
         cursor = conn.cursor()
+        cursor.execute(
+            'SELECT AVG(score) FROM interview_qa '
+            'WHERE interview_id = %s AND score IS NOT NULL', (interview_id,))
+        row = cursor.fetchone()
+        if not row or row[0] is None:
+            st.warning("⚠️ No scored answers were found for this interview, so "
+                       "no final score was recorded.")
+            return None
+        score = round(100 * float(row[0]))
         # resume_json is cleared here: a finished interview must not show up
         # as resumable on the next login.
         cursor.execute(
@@ -886,11 +907,11 @@ def finalize_interview(interview_id, score, evaluation_text):
         if cursor.rowcount == 0:
             # The update ran but matched nothing — a wrong or deleted id.
             st.warning(f"⚠️ No interview row #{interview_id} was updated.")
-            return False
-        return True
+            return None
+        return score
     except Error as e:
         st.error(f"⚠️ Could not save your final score: {e}")
-        return False
+        return None
     finally:
         try:
             cursor.close(); conn.close()
@@ -1044,6 +1065,7 @@ if "interview_answers" not in st.session_state: st.session_state.interview_answe
 # from `generated_questions` (which stays as the record of what was planned).
 if "interview_queue" not in st.session_state: st.session_state.interview_queue = []
 if "interview_evaluations" not in st.session_state: st.session_state.interview_evaluations = []
+if "final_score" not in st.session_state: st.session_state.final_score = None
 if "interview_language" not in st.session_state: st.session_state.interview_language = "en"
 if "covered_skills" not in st.session_state: st.session_state.covered_skills = []
 if "probe_depth" not in st.session_state: st.session_state.probe_depth = 0
@@ -1456,6 +1478,7 @@ def _reset_interview_state():
     st.session_state.covered_skills = []
     st.session_state.probe_depth = 0
     st.session_state.off_plan_used = 0
+    st.session_state.final_score = None
 
 
 def _extract_pdf_text(uploaded_file) -> str:
@@ -1848,14 +1871,14 @@ def render_interview():
                     if cycle.get("error"):
                         st.error(cycle["error"])
                     else:
-                        scores = [e.get("final_score") for e in st.session_state.interview_evaluations
-                                  if isinstance(e.get("final_score"), (int, float))]
-                        overall = round(100 * sum(scores) / len(scores)) if scores else 0
                         summary = " ".join(
                             a["feedback"] for a in st.session_state.interview_answers
                             if a.get("feedback"))[:2000]
-                        finalize_interview(st.session_state.current_interview_id,
-                                           overall, summary)
+                        # The score comes back from the database rather than
+                        # being computed here, so what is stored and what is
+                        # shown are the same number by construction.
+                        st.session_state.final_score = finalize_interview(
+                            st.session_state.current_interview_id, summary)
                         st.session_state.current_question += 1
                         st.rerun()
         else:
@@ -1871,7 +1894,13 @@ def render_interview():
             evals = st.session_state.interview_evaluations
             scores = [e.get("final_score") for e in evals
                       if isinstance(e.get("final_score"), (int, float))]
-            overall = round(100 * sum(scores) / len(scores)) if scores else 0
+            # Prefer the figure finalize_interview() computed from the stored
+            # answer rows, so the report shows exactly what was written. The
+            # session-state average is only a fallback for a report re-rendered
+            # after the write already happened.
+            overall = st.session_state.get("final_score")
+            if overall is None:
+                overall = round(100 * sum(scores) / len(scores)) if scores else 0
 
             # Colour and label follow the same thresholds the agent routes on,
             # so what the candidate reads matches what the system decided.
