@@ -35,6 +35,18 @@ if st.session_state.dark_mode:
     _gradient_text = "linear-gradient(135deg, #FFFFFF 30%, #A78BFA 100%)"
     _badge_bg = "rgba(124, 58, 237, 0.15)"
     _badge_color = "#C084FC"
+    _muted = "#9CA3AF"
+    _muted_soft = "#6B7280"
+    _hr = "rgba(255, 255, 255, 0.06)"
+    _c_violet = "#A78BFA"
+    _c_blue = "#60A5FA"
+    _c_green = "#34D399"
+    _c_cyan = "#06B6D4"
+    _c_amber = "#F59E0B"
+    _c_yellow = "#FBBF24"
+    _c_red = "#F87171"
+    _input_bg = "rgba(255, 255, 255, 0.04)"
+    _input_border = "rgba(255, 255, 255, 0.14)"
 else:
     _bg_base = "#F7F5FC"
     _bg_gradient = "radial-gradient(circle at 50% -20%, #EDE9FE, #F7F5FC 60%)"
@@ -47,6 +59,21 @@ else:
     _gradient_text = "linear-gradient(135deg, #1F2937 30%, #7C3AED 100%)"
     _badge_bg = "rgba(124, 58, 237, 0.08)"
     _badge_color = "#6D28D9"
+    # The light branch darkens every accent. The dark-theme tints (#A78BFA,
+    # #34D399 ...) sit around 2:1 contrast on a near-white page, which is
+    # below the readable floor; these variants clear 4.5:1.
+    _muted = "#4B5563"
+    _muted_soft = "#6B7280"
+    _hr = "rgba(17, 24, 39, 0.10)"
+    _c_violet = "#6D28D9"
+    _c_blue = "#1D4ED8"
+    _c_green = "#047857"
+    _c_cyan = "#0E7490"
+    _c_amber = "#B45309"
+    _c_yellow = "#B45309"
+    _c_red = "#DC2626"
+    _input_bg = "#FFFFFF"
+    _input_border = "rgba(17, 24, 39, 0.16)"
 
 # Injected custom CSS - includes a permanent fix for the sidebar toggle button disappearing
 st.markdown(f"""
@@ -61,6 +88,108 @@ st.markdown(f"""
 
     .stApp {{
         background: {_bg_gradient};
+    }}
+
+    /* === Legibility on the light theme ===
+       .streamlit/config.toml pins Streamlit's base theme to "dark", which is
+       what gives the app its look out of the box — but it also means every
+       element Streamlit renders itself (headings, labels, tab titles,
+       expander headers, widget text) is painted near-white by Streamlit's own
+       stylesheet. Setting `color` on html/body cannot reach them: those rules
+       target the elements directly and win on specificity. So when Dark Mode
+       is switched off the background flips to light and that text stays
+       white, i.e. invisible. These selectors re-colour Streamlit's elements
+       from the same variables that drive the rest of the palette. */
+    .stApp, .stApp p, .stApp li, .stApp label, .stApp small, .stApp summary,
+    .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+    .stApp [data-testid="stMarkdownContainer"],
+    .stApp [data-testid="stWidgetLabel"],
+    .stApp [data-testid="stWidgetLabel"] p,
+    .stApp [data-testid="stMetricValue"],
+    .stApp [data-testid="stMetricLabel"],
+    .stApp [data-baseweb="tab"],
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] small,
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] h4,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {{
+        color: {_text_color};
+    }}
+
+    /* Buttons keep white text: they sit on the violet gradient in both
+       themes, so the rule above must not reach the label inside them. */
+    .stApp .stButton > button, .stApp .stButton > button *,
+    .stApp .stDownloadButton > button, .stApp .stDownloadButton > button *,
+    .stApp .stFormSubmitButton > button, .stApp .stFormSubmitButton > button * {{
+        color: #FFFFFF !important;
+    }}
+
+    /* Captions stay deliberately quieter than body text. */
+    .stApp [data-testid="stCaptionContainer"],
+    .stApp [data-testid="stCaptionContainer"] p {{
+        color: {_muted} !important;
+    }}
+
+    /* Inputs carry their own surface so the answer box, the CV uploader and
+       the dropdowns stay legible on either background. */
+    .stApp textarea, .stApp input,
+    .stApp [data-baseweb="input"], .stApp [data-baseweb="textarea"],
+    .stApp [data-baseweb="base-input"], .stApp [data-baseweb="base-textarea"],
+    .stApp [data-baseweb="select"] > div,
+    .stApp [data-testid="stFileUploaderDropzone"] {{
+        background-color: {_input_bg} !important;
+        color: {_text_color} !important;
+        border-color: {_input_border} !important;
+    }}
+
+    /* The password reveal icon is a button *inside* the input, so it inherits
+       nothing from the rule above. */
+    .stApp [data-baseweb="base-input"] button {{
+        color: {_text_color} !important;
+        background: transparent !important;
+    }}
+
+    .stApp textarea::placeholder, .stApp input::placeholder {{
+        color: {_muted} !important;
+        opacity: 1;
+    }}
+
+    .stApp hr {{
+        border-color: {_hr};
+    }}
+
+    /* Streamlit's secondary buttons — the file uploader's browse control among
+       them — keep the dark base surface, so give them one that matches the
+       active theme rather than leaving dark text on a dark button. */
+    .stApp button[data-testid="stBaseButton-secondary"] {{
+        background-color: {_input_bg} !important;
+        border-color: {_input_border} !important;
+    }}
+    .stApp button[data-testid="stBaseButton-secondary"] * {{
+        color: {_text_color} !important;
+    }}
+
+    /* The uploader's hint line ("5MB per file - PDF") is a bare span that
+       Streamlit paints translucent white. */
+    .stApp [data-testid="stFileUploaderDropzoneInstructions"] span,
+    .stApp [data-testid="stFileUploaderDropzoneInstructions"] small {{
+        color: {_muted} !important;
+    }}
+
+    /* Streamlit's default link blue drops under 3:1 on the light background. */
+    .stApp a, [data-testid="stSidebar"] a {{
+        color: {_c_blue};
+    }}
+
+    /* The sidebar collapse/expand arrows. Streamlit renamed this control's
+       test id (it is no longer stSidebarCollapseButton), so the gradient rule
+       further down no longer reaches it and the icon stayed near-white —
+       invisible on the light background. */
+    .stApp button[data-testid="stBaseButton-headerNoPadding"] *,
+    .stApp button[data-testid="stExpandSidebarButton"] *,
+    [data-testid="stSidebar"] button[data-testid="stBaseButton-headerNoPadding"] * {{
+        color: {_text_color} !important;
     }}
 
     /* === 🛠️ Definitive fix for the sidebar toggle button === */
@@ -144,7 +273,7 @@ st.markdown(f"""
 
     .badge {{
         background: {_badge_bg};
-        color: {_badge_color};
+        color: {_badge_color} !important;
         border: 1px solid rgba(124, 58, 237, 0.3);
         padding: 4px 12px;
         border-radius: 50px;
@@ -783,7 +912,7 @@ def render_landing():
     st.markdown("<div style='text-align: center; padding: 60px 0 40px 0;'>", unsafe_allow_html=True)
     st.markdown("<span class='badge'>✨ Next-Gen AI Mock Interviews</span>", unsafe_allow_html=True)
     st.markdown("<h1 style='font-size: 4rem; margin-top: 15px;' class='gradient-text'>Ace your next job interview <br>with the power of AI</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='font-size: 1.25rem; color: #9CA3AF; max-width: 700px; margin: 20px auto;'>Upload your CV, enter the job description, and let the AI interview engine test you and give you a detailed evaluation that guarantees you're ready.</p>", unsafe_allow_html=True)
+    st.markdown(f"<p style='font-size: 1.25rem; color: {_muted}; max-width: 700px; margin: 20px auto;'>Upload your CV, enter the job description, and let the AI interview engine test you and give you a detailed evaluation that guarantees you're ready.</p>", unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns([1.5, 1, 1.5])
     with col2:
@@ -791,33 +920,33 @@ def render_landing():
             navigate_to("Auth")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin: 40px 0;'>", unsafe_allow_html=True)
+    st.markdown(f"<hr style='border-color: {_hr}; margin: 40px 0;'>", unsafe_allow_html=True)
 
     # Features
     st.markdown("<h2 style='text-align: center; margin-bottom: 40px;' class='gradient-text'>Platform Features</h2>", unsafe_allow_html=True)
     f_col1, f_col2, f_col3 = st.columns(3)
     with f_col1:
-        st.markdown('<div class="premium-card"><h3 style="color: #A78BFA;">📄 CV Analysis</h3><p style="color: #9CA3AF;">An LLM-powered processing system that analyzes the strengths, weaknesses, and experience in your CV.</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="premium-card"><h3 style="color: {_c_violet};">📄 CV Analysis</h3><p style="color: {_muted};">An LLM-powered processing system that analyzes the strengths, weaknesses, and experience in your CV.</p></div>', unsafe_allow_html=True)
     with f_col2:
-        st.markdown('<div class="premium-card"><h3 style="color: #60A5FA;">🎯 Smart Live Simulation</h3><p style="color: #9CA3AF;">Dynamically generates technical and behavioral questions tailored to the company and job description.</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="premium-card"><h3 style="color: {_c_blue};">🎯 Smart Live Simulation</h3><p style="color: {_muted};">Dynamically generates technical and behavioral questions tailored to the company and job description.</p></div>', unsafe_allow_html=True)
     with f_col3:
-        st.markdown('<div class="premium-card"><h3 style="color: #34D399;">📊 Scoring & Evaluation</h3><p style="color: #9CA3AF;">Get a complete dashboard showing your strengths and precise mistakes, along with professional alternative phrasing.</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="premium-card"><h3 style="color: {_c_green};">📊 Scoring & Evaluation</h3><p style="color: {_muted};">Get a complete dashboard showing your strengths and precise mistakes, along with professional alternative phrasing.</p></div>', unsafe_allow_html=True)
 
     # Pricing
-    st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin: 40px 0;'>", unsafe_allow_html=True)
+    st.markdown(f"<hr style='border-color: {_hr}; margin: 40px 0;'>", unsafe_allow_html=True)
     st.markdown("<h2 style='text-align: center; margin-bottom: 40px;' class='gradient-text'>Flexible Subscription Plans</h2>", unsafe_allow_html=True)
 
     p_col1, p_col2, p_col3 = st.columns(3)
     with p_col1:
-        st.markdown('<div class="premium-card" style="border-top: 3px solid #9CA3AF;"><h3>Free Plan</h3><h2 style="margin: 15px 0;">$0 <span style="font-size: 1rem; color: #9CA3AF;">/ month</span></h2><p style="color: #9CA3AF;">• One full interview per month<br>• Basic CV analysis<br>• Simplified report format</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="premium-card" style="border-top: 3px solid {_muted};"><h3>Free Plan</h3><h2 style="margin: 15px 0;">$0 <span style="font-size: 1rem; color: {_muted};">/ month</span></h2><p style="color: {_muted};">• One full interview per month<br>• Basic CV analysis<br>• Simplified report format</p></div>', unsafe_allow_html=True)
         if st.button("Choose the Free Plan", key="btn_free"): navigate_to("Auth")
 
     with p_col2:
-        st.markdown('<div class="premium-card" style="border-top: 3px solid #7C3AED; background: rgba(124, 58, 237, 0.03);"><h3>Pro Plan 🔥</h3><h2 style="margin: 15px 0;">$29 <span style="font-size: 1rem; color: #9CA3AF;">/ month</span></h2><p style="color: #A78BFA;">• Unlimited AI-powered interviews<br>• Advanced analysis & JD matching<br>• Precise AI answer evaluation</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="premium-card" style="border-top: 3px solid #7C3AED; background: rgba(124, 58, 237, 0.03);"><h3>Pro Plan 🔥</h3><h2 style="margin: 15px 0;">$29 <span style="font-size: 1rem; color: {_muted};">/ month</span></h2><p style="color: {_c_violet};">• Unlimited AI-powered interviews<br>• Advanced analysis & JD matching<br>• Precise AI answer evaluation</p></div>', unsafe_allow_html=True)
         if st.button("Subscribe to Pro Now", key="btn_pro"): navigate_to("Auth")
 
     with p_col3:
-        st.markdown('<div class="premium-card" style="border-top: 3px solid #06B6D4;"><h3>Premium Plan 👑</h3><h2 style="margin: 15px 0;">$79 <span style="font-size: 1rem; color: #9CA3AF;">/ month</span></h2><p style="color: #9CA3AF;">• All Pro plan features<br>• Live voice interview simulation<br>• Custom reports, shareable with companies</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="premium-card" style="border-top: 3px solid {_c_cyan};"><h3>Premium Plan 👑</h3><h2 style="margin: 15px 0;">$79 <span style="font-size: 1rem; color: {_muted};">/ month</span></h2><p style="color: {_muted};">• All Pro plan features<br>• Live voice interview simulation<br>• Custom reports, shareable with companies</p></div>', unsafe_allow_html=True)
         if st.button("Subscribe to Premium Now", key="btn_premium"): navigate_to("Auth")
 
 # --- PAGE: AUTHENTICATION (CONNECTED TO MYSQL) ---
@@ -865,7 +994,7 @@ def render_auth():
             else:
                 st.error("Please fill in all the fields.")
 
-    st.markdown("<div style='text-align: center; margin-top: 15px; color:#9CA3AF;'>Or continue with a global account</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align: center; margin-top: 15px; color:{_muted};'>Or continue with a global account</div>", unsafe_allow_html=True)
     st.button("🌐 Central Authorization (Google)")
     st.markdown("</div></div>", unsafe_allow_html=True)
 
@@ -888,15 +1017,15 @@ def render_dashboard():
     if len(valid_scores) >= 2:
         delta = valid_scores[-1] - valid_scores[-2]
         arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "▬")
-        colour = "#34D399" if delta > 0 else ("#F87171" if delta < 0 else "#9CA3AF")
+        colour = _c_green if delta > 0 else (_c_red if delta < 0 else _muted)
         delta_txt = (f"<div style='color:{colour}; font-size:0.85rem;'>"
                      f"{arrow} {abs(delta)}% since last session</div>")
 
     m1, m2, m3, m4 = st.columns(4)
-    with m1: st.markdown(f"<div class='premium-card'><small style='color: #9CA3AF;'>Total Interviews</small><h2 style='color:#7C3AED;'>{total_interviews}</h2></div>", unsafe_allow_html=True)
-    with m2: st.markdown(f"<div class='premium-card'><small style='color: #9CA3AF;'>Latest Score</small><h2 style='color:#06B6D4;'>{valid_scores[-1] if valid_scores else 0}%</h2>{delta_txt}<small style='color:#6B7280;'>average {avg_score}%</small></div>", unsafe_allow_html=True)
-    with m3: st.markdown(f"<div class='premium-card'><small style='color: #9CA3AF;'>CV Status</small><h2 style='color:#34D399;'>{'Analyzed & Uploaded' if st.session_state.cv_uploaded else 'Not uploaded yet'}</h2></div>", unsafe_allow_html=True)
-    with m4: st.markdown("<div class='premium-card'><small style='color: #9CA3AF;'>Current Plan</small><h2 style='color:#F59E0B;'>Pro Plan</h2></div>", unsafe_allow_html=True)
+    with m1: st.markdown(f"<div class='premium-card'><small style='color: {_muted};'>Total Interviews</small><h2 style='color:#7C3AED;'>{total_interviews}</h2></div>", unsafe_allow_html=True)
+    with m2: st.markdown(f"<div class='premium-card'><small style='color: {_muted};'>Latest Score</small><h2 style='color:{_c_cyan};'>{valid_scores[-1] if valid_scores else 0}%</h2>{delta_txt}<small style='color:{_muted_soft};'>average {avg_score}%</small></div>", unsafe_allow_html=True)
+    with m3: st.markdown(f"<div class='premium-card'><small style='color: {_muted};'>CV Status</small><h2 style='color:{_c_green};'>{'Analyzed & Uploaded' if st.session_state.cv_uploaded else 'Not uploaded yet'}</h2></div>", unsafe_allow_html=True)
+    with m4: st.markdown(f"<div class='premium-card'><small style='color: {_muted};'>Current Plan</small><h2 style='color:{_c_amber};'>Pro Plan</h2></div>", unsafe_allow_html=True)
 
     col_left, col_right = st.columns([2, 1])
     with col_left:
@@ -930,9 +1059,9 @@ def render_dashboard():
 
             body = ""
             for title, group, colour, sign in (
-                ("تحسّنت / Improved", sorted(improved, key=lambda r: -r[3]), "#34D399", "+"),
-                ("تراجعت / Declined", sorted(declined, key=lambda r: r[3]), "#F87171", ""),
-                ("ما زالت ضعيفة / Still weak", stuck, "#FBBF24", ""),
+                ("تحسّنت / Improved", sorted(improved, key=lambda r: -r[3]), _c_green, "+"),
+                ("تراجعت / Declined", sorted(declined, key=lambda r: r[3]), _c_red, ""),
+                ("ما زالت ضعيفة / Still weak", stuck, _c_yellow, ""),
             ):
                 if not group:
                     continue
@@ -943,13 +1072,13 @@ def render_dashboard():
                              f"<span style='color:{colour};'>({sign}{change:.0f}%)</span></p>")
             st.markdown(
                 f"<div class='premium-card'><h3>📊 Skill Progress</h3>{body}"
-                f"<p style='color:#6B7280; font-size:0.75rem; margin-top:10px;'>"
+                f"<p style='color:{_muted_soft}; font-size:0.75rem; margin-top:10px;'>"
                 f"Compared across your sessions, first to latest.</p></div>",
                 unsafe_allow_html=True)
         elif prog_ok and progress:
             st.markdown(
                 "<div class='premium-card'><h3>📊 Skill Progress</h3>"
-                "<p style='color:#9CA3AF; font-size:0.9rem;'>Complete a second "
+                f"<p style='color:{_muted}; font-size:0.9rem;'>Complete a second "
                 "interview on the same skills to see how much you improved.</p></div>",
                 unsafe_allow_html=True)
 
@@ -967,7 +1096,7 @@ def render_dashboard():
             items = "Complete an interview to see recommendations based on your own answers."
         st.markdown(
             '<div class="premium-card"><h3>🤖 Personalized AI Recommendations</h3>'
-            '<p style="color: #9CA3AF; font-size: 0.9rem; line-height: 1.6;">'
+            f'<p style="color: {_muted}; font-size: 0.9rem; line-height: 1.6;">'
             f'{items}</p></div>', unsafe_allow_html=True)
 
 def _rtl(text: str) -> str:
@@ -1211,7 +1340,26 @@ def render_upload():
     st.markdown("<div class='premium-card'>", unsafe_allow_html=True)
     st.subheader("2. Target Job Details")
     job_title = st.text_input("Target Job Title", "Software Engineer")
-    job_desc = st.text_area("Enter the Job Description", value="Write the job description details here...")
+    # Placeholder rather than a pre-filled value: the old default made the user
+    # delete a sentence before typing, and it had to be string-matched below to
+    # tell "untouched" from "empty".
+    #
+    # The hint is not only politeness. Salary, benefits, working hours, location
+    # and how-to-apply carry no skills, so they add prompt tokens and give the
+    # model more irrelevant text to reason over — a full posting is what pushed
+    # one request into spending its entire budget deliberating without ever
+    # writing an answer. Trimming shrinks every call, not just the failing ones.
+    job_desc = st.text_area(
+        "Enter the Job Description",
+        placeholder=("Paste the responsibilities and requirements.\n\n"
+                     "You can leave out salary, benefits, working hours, "
+                     "location and how-to-apply — they hold no skills, and "
+                     "dropping them makes the analysis faster and more accurate."),
+        height=170,
+        help="Only the responsibilities and requirements are read. Everything "
+             "else in a posting is ignored, so pasting it just slows the "
+             "analysis down.",
+    )
 
     col1, col2 = st.columns(2)
     with col1: experience = st.selectbox("Current Experience Level", ["Junior (0-2 years)", "Mid-Level (2-5 years)", "Senior (5+ years)"])
@@ -1233,7 +1381,7 @@ def render_upload():
     if st.button("🔍 Analyze the Gap Between Your Skills and the Job"):
         if not st.session_state.cv_skills:
             st.warning("Upload your CV and analyze your skills first (step 1) before running the gap analysis.")
-        elif not job_desc.strip() or job_desc.strip() == "Write the job description details here...":
+        elif not job_desc.strip():
             st.warning("Enter the actual job description first.")
         else:
             with st.spinner("Analyzing the job requirements and comparing them to your skills..."):
@@ -1374,7 +1522,7 @@ def render_interview():
             st.markdown(
                 f"<div class='premium-card' style='border-left: 4px solid #7C3AED;'>"
                 f"<h5>Current Question ({curr_idx + 1} of {total_qs}):</h5>"
-                f"<h3 style='color: #A78BFA;'>{_rtl(current_q_text)}</h3></div>",
+                f"<h3 style='color: {_c_violet};'>{_rtl(current_q_text)}</h3></div>",
                 unsafe_allow_html=True,
             )
             answer_label = ("اكتب إجابتك الكاملة هنا:"
@@ -1491,7 +1639,7 @@ def render_interview():
                         st.session_state.current_question += 1
                         st.rerun()
         else:
-            st.markdown("<div class='premium-card' style='background: rgba(52, 211, 153, 0.03); border-color: #34D399;'><h3>🎉 Interview completed successfully! Generating your in-depth evaluation results...</h3></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='premium-card' style='background: rgba(52, 211, 153, 0.03); border-color: {_c_green};'><h3>🎉 Interview completed successfully! Generating your in-depth evaluation results...</h3></div>", unsafe_allow_html=True)
             progress_bar = st.progress(0)
             for percent_complete in range(100):
                 time.sleep(0.003)
@@ -1508,11 +1656,11 @@ def render_interview():
             # Colour and label follow the same thresholds the agent routes on,
             # so what the candidate reads matches what the system decided.
             if overall >= 80:
-                colour, verdict = "#34D399", "Ready for the real interview"
+                colour, verdict = _c_green, "Ready for the real interview"
             elif overall >= 40:
-                colour, verdict = "#FBBF24", "Solid in places — see the weak skills below"
+                colour, verdict = _c_yellow, "Solid in places — see the weak skills below"
             else:
-                colour, verdict = "#F87171", "Needs preparation before interviewing"
+                colour, verdict = _c_red, "Needs preparation before interviewing"
 
             score_col1, score_col2 = st.columns([1, 2])
             with score_col1:
@@ -1520,7 +1668,7 @@ def render_interview():
                     f"<div class='premium-card' style='text-align: center;'><h4>Overall Score</h4>"
                     f"<h1 style='font-size: 4rem; color: {colour};'>{overall}%</h1>"
                     f"<span class='badge'>{verdict}</span>"
-                    f"<p style='color:#9CA3AF; font-size:0.8rem; margin-top:8px;'>"
+                    f"<p style='color:{_muted}; font-size:0.8rem; margin-top:8px;'>"
                     f"mean of {len(scores)} evaluated answer(s)</p></div>",
                     unsafe_allow_html=True,
                 )
@@ -1535,10 +1683,10 @@ def render_interview():
                               key=lambda x: x[1])
                 body = "".join(
                     f"<p><b>• {skill}:</b> {avg * 100:.0f}%</p>" for skill, avg in rows
-                ) or "<p style='color:#9CA3AF;'>No answers were evaluated.</p>"
+                ) or f"<p style='color:{_muted};'>No answers were evaluated.</p>"
                 st.markdown(
                     f"<div class='premium-card'><h4>Skill Breakdown "
-                    f"<span style='color:#9CA3AF; font-size:0.8rem;'>(weakest first)</span></h4>"
+                    f"<span style='color:{_muted}; font-size:0.8rem;'>(weakest first)</span></h4>"
                     f"{body}</div>",
                     unsafe_allow_html=True,
                 )
@@ -1584,7 +1732,7 @@ def render_interview():
                                 f"<details><summary style='color:#7C3AED; cursor:pointer;'>"
                                 f"Why the interview went this way "
                                 f"(<code>{item.get('route')}</code>)</summary>"
-                                f"<p style='color:#9CA3AF; font-size:0.85rem;'>{item['thought'][:900]}</p>"
+                                f"<p style='color:{_muted}; font-size:0.85rem;'>{item['thought'][:900]}</p>"
                                 f"</details>",
                                 unsafe_allow_html=True)
                         st.markdown("---")
@@ -1613,7 +1761,7 @@ def render_interview():
                         st.markdown(
                             f"**Q{i}** — targets <b>{q['targets_skill']}</b> ({gap_label}) &nbsp;|&nbsp; "
                             f"AS = <b>{q['answerability_score']:.2f}</b> {gate_icon} "
-                            f"<span style='color:#9CA3AF; font-size:0.85rem;'>"
+                            f"<span style='color:{_muted}; font-size:0.85rem;'>"
                             f"(entities {entities_label} · clarity {q['context_clarity']:.2f} · specificity {q['task_specificity']:.2f})"
                             f"</span>",
                             unsafe_allow_html=True,
@@ -1634,7 +1782,7 @@ def render_billing():
 
 st.sidebar.markdown("<h2 class='gradient-text' style='text-align:center;'>IntervAI Pro 🤖</h2>", unsafe_allow_html=True)
 st.sidebar.toggle("🌙 Dark Mode", key="dark_mode")
-st.sidebar.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
+st.sidebar.markdown(f"<hr style='border-color: {_hr};'>", unsafe_allow_html=True)
 render_db_badge()
 
 if not st.session_state.is_logged_in:
@@ -1644,7 +1792,7 @@ if not st.session_state.is_logged_in:
     nav_selection = st.sidebar.radio("Main Menu", available_pages, index=default_idx)
     st.session_state.page = "Landing" if nav_selection == "Home (Landing Page)" else "Auth"
 else:
-    st.sidebar.markdown(f"<p style='text-align:center; color:#A78BFA;'>👤 {st.session_state.user_name}</p>", unsafe_allow_html=True)
+    st.sidebar.markdown(f"<p style='text-align:center; color:{_c_violet};'>👤 {st.session_state.user_name}</p>", unsafe_allow_html=True)
     menu_options = {
         "📊 Dashboard": "Dashboard",
         "📂 Upload System": "Upload System",
@@ -1662,7 +1810,7 @@ else:
     selection = st.sidebar.radio("Cloud Navigation Panel", list_keys, index=default_idx)
     st.session_state.page = menu_options[selection]
 
-    st.sidebar.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
+    st.sidebar.markdown(f"<hr style='border-color: {_hr};'>", unsafe_allow_html=True)
     if st.sidebar.button("Log Out"):
         st.session_state.is_logged_in = False
         st.session_state.user_id = None

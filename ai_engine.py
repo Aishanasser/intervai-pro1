@@ -168,8 +168,27 @@ Output format:
 # ==========================================
 # 3. LLM call wrapper (swap this when moving providers)
 # ==========================================
-def _call_llm(system_prompt: str, user_prompt: str) -> str:
-    response = client.invoke([
+# DeepSeek v4 Pro is a reasoning model: it spends completion tokens thinking
+# before it writes a single character of the answer, and that thinking is
+# billed against the same max_tokens budget as the answer itself. Extraction
+# normally costs about 1,300 reasoning tokens, but a job description padded
+# with benefits, equal-opportunity boilerplate and application instructions has
+# been observed to make it deliberate until all 16,384 tokens were gone and
+# emit no content at all. The call then fails inside the OpenAI client with a
+# raw CompletionUsage dump, which is what the user sees.
+#
+# reasoning_effort="low" does not help — measured on this model, reasoning went
+# up (1,375 tokens) rather than down (1,310). What does help is room: the
+# model's context window is 1,048,576 tokens, so the 16,384 ceiling is ours,
+# not the model's, and a truncated call can simply be retried with more of it.
+_RETRY_MAX_TOKENS = 49_152
+_TRUNCATION_MARKER = "length limit was reached"
+
+
+def _call_llm(system_prompt: str, user_prompt: str,
+              max_tokens: int | None = None) -> str:
+    target = client if max_tokens is None else client.bind(max_tokens=max_tokens)
+    response = target.invoke([
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ])
@@ -208,7 +227,22 @@ def _call_llm_json(system_prompt: str, user_prompt: str) -> dict:
     try:
         raw_output = _call_llm(system_prompt, user_prompt)
     except Exception as e:
-        return {"error": f"LLM call failed: {str(e)}"}
+        if _TRUNCATION_MARKER not in str(e):
+            return {"error": f"LLM call failed: {str(e)}"}
+        # Ran out of budget while still thinking. Give it three times the room
+        # once before giving up; the failure is intermittent, not deterministic.
+        try:
+            raw_output = _call_llm(system_prompt, user_prompt,
+                                   max_tokens=_RETRY_MAX_TOKENS)
+        except Exception as retry_error:
+            if _TRUNCATION_MARKER in str(retry_error):
+                return {"error": "The model spent its whole budget reasoning "
+                                 "and never wrote an answer, twice in a row. "
+                                 "Please try again — and if it keeps failing, "
+                                 "trim the text to the responsibilities and "
+                                 "requirements, since benefits and application "
+                                 "instructions are what set this off."}
+            return {"error": f"LLM call failed: {str(retry_error)}"}
 
     try:
         return json.loads(raw_output)
