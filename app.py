@@ -1808,6 +1808,23 @@ def render_interview():
                 # skill. The column holds only the question text, and matching
                 # a skill back out of that text would be guesswork.
                 evaluation["targets_skill"] = current_q.get("targets_skill", "")
+                # The agent's decision, stored with the answer for the same
+                # reason targets_skill is. These four lived only in
+                # st.session_state, so they were shown in the report and then
+                # lost when the browser session ended: two completed interviews
+                # exist in the database with no record of what the agent chose
+                # at any point, and whether a probe happened had to be inferred
+                # from the wording of the next question.
+                #
+                # used_fallback matters most. It was added to measure how often
+                # the model replies without invoking a tool — a number that
+                # belongs in the results chapter — and it could never be
+                # computed, because nothing wrote it down.
+                evaluation["route"] = cycle.get("route")
+                evaluation["reason"] = cycle.get("reason", "")
+                evaluation["thought"] = (cycle.get("thought") or "")[:1200]
+                evaluation["used_fallback"] = cycle.get("used_fallback")
+                evaluation["budget_capped"] = cycle.get("budget_capped")
 
                 save_question_answer(st.session_state.current_interview_id,
                                      current_q_text, user_ans,
