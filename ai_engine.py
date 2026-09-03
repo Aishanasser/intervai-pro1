@@ -398,6 +398,47 @@ def extract_jd_requirements(jd_text: str) -> dict:
 _SEMANTIC_MODEL = None
 _GAP_SIMILARITY_THRESHOLD = 0.6
 
+# Languages are extracted with their proficiency wording attached, because the
+# candidate should see "Fluent in written and spoken English" rather than a
+# bare "English". But that wording is noise when MATCHING: a JD asking for
+# "Fluent in written and spoken English" scores only 0.54 against a CV that
+# lists "English" — below the 0.6 gate — so the system would report that the
+# candidate does not speak English at all. Stripping the proficiency words on
+# both sides before comparing fixes the match without touching what is shown.
+#
+# This is the same principle as normalize_text(): the conservative form is
+# stored, and aggressive folding happens in the matching layer where it belongs.
+_PROFICIENCY_WORDS = re.compile(
+    r"\b(?:fluent(?:ly)?|fluency|native|bilingual|mother\s+tongue|proficien\w*|"
+    r"advanced|intermediate|beginner|basic|elementary|conversational|working|"
+    r"professional|excellent|very|good|level|command|skills?|knowledge|"
+    r"spoken|written|writing|reading|speaking|understanding|in|and|of|a|an|the)\b",
+    re.IGNORECASE)
+# Bounded on both sides by non-Arabic, so a short term cannot be cut out of
+# the middle of a longer word the way a bare alternation would.
+_AR_PROFICIENCY_TERMS = (
+    "بطلاقة", "طلاقة", "لغة الأم", "اللغة الأم", "الأم",
+    "متقدم", "متقدّم", "متوسط", "متوسّط", "مبتدئ", "ممتاز",
+    "جيد", "جيّد", "ضعيف", "محادثة", "كتابة", "قراءة",
+    "تحدث", "تحدّث", "مستوى", "إلمام", "أساسي", "لغة",
+)
+_PROFICIENCY_WORDS_AR = re.compile(
+    "|".join(f"(?<![{_ARABIC_RANGE.pattern[1:-1]}]){re.escape(t)}"
+             f"(?![{_ARABIC_RANGE.pattern[1:-1]}])"
+             for t in _AR_PROFICIENCY_TERMS))
+
+
+def _language_core(text: str) -> str:
+    """The language name with its proficiency wording removed.
+
+    Falls back to the original string when stripping leaves nothing, so an
+    entry that is only a qualifier is compared as written rather than as "".
+    """
+    stripped = _PROFICIENCY_WORDS.sub(" ", text)
+    stripped = _PROFICIENCY_WORDS_AR.sub(" ", stripped)
+    stripped = re.sub(r"[^\w؀-ۿ]+", " ", stripped).strip()
+    return stripped or text
+
 
 def _get_semantic_model():
     """Lazy-load the sentence-transformers model (only needed for skill-gap matching)."""
@@ -445,8 +486,27 @@ def compute_skill_gap(candidate_result: dict, jd_result: dict) -> dict:
             gap[gap_key] = list(jd_skills)
             continue
 
-        jd_embeddings = model.encode(jd_skills, convert_to_tensor=True)
-        candidate_embeddings = model.encode(candidate_skills, convert_to_tensor=True)
+        # Languages do not go through the embedding model at all. Language
+        # names are a closed vocabulary of proper nouns, and the model places
+        # them close together precisely BECAUSE they are all languages:
+        # measured, French/English = 0.64 and German/Spanish = 0.60, both above
+        # the 0.6 gate. Semantic similarity would therefore report that a
+        # candidate who speaks only English satisfies a requirement for French.
+        # Comparing the language name as a string is both correct and exact.
+        if category == "languages":
+            have = {_language_core(x).casefold() for x in candidate_skills}
+            gap[gap_key] = [
+                x for x in jd_skills
+                if not any(core == h or core in h or h in core
+                           for h in have
+                           for core in (_language_core(x).casefold(),))
+            ]
+            continue
+
+        jd_terms, candidate_terms = jd_skills, candidate_skills
+
+        jd_embeddings = model.encode(jd_terms, convert_to_tensor=True)
+        candidate_embeddings = model.encode(candidate_terms, convert_to_tensor=True)
 
         from sentence_transformers import util
         similarity_matrix = util.cos_sim(jd_embeddings, candidate_embeddings)
@@ -525,6 +585,21 @@ on what they already claim:
 
 If one of the two lists holds fewer distinct skills than its quota, take the
 shortfall from the other list rather than repeating a skill.
+
+HOW MANY OF EACH KIND:
+
+- **Exactly {soft_count} of the {num_questions} questions must target a SOFT /
+  behavioural skill.** The rest are technical. This quota is fixed: without it
+  the number of behavioural questions drifts with whatever the two skill lists
+  happen to contain, and one interview gets one while another gets three — so
+  the interviews are not comparable to each other.
+- Draw the soft skills from the JD and CV lists, gap ones first. If together
+  they hold fewer than {soft_count} distinct soft skills, ask about the
+  soft skills that exist and give the remainder to technical questions rather
+  than inventing a soft skill nobody mentioned.
+- Where the two splits disagree — the gap/existing split above and this one —
+  **this quota wins**, and the gap/existing balance is met as closely as the
+  remaining questions allow.
 
 TWO KINDS OF SKILL NEED TWO KINDS OF QUESTION:
 
@@ -1084,9 +1159,29 @@ def _compute_answerability(question_text: str, targets_skill: str, vocabulary: s
 # interview the candidate fails entirely, yielding no signal about strengths.
 _GAP_QUESTION_RATIO = 0.6
 
+# Behavioural questions per interview. Left to the model's discretion this
+# drifted with the skill lists — one real interview got a single behavioural
+# question and another got three — which makes two candidates' reports
+# incomparable on the soft-skill axis. Fixing the count fixes that.
+#
+# Three of eight keeps the interview technical-first while still giving the
+# STAR rubric enough episodes to average over. Raising it without shortening
+# the technical half would invert the balance of the interview.
+SOFT_QUESTION_COUNT = 3
+
+
+# Planned questions per interview, before the agent adds any follow-up.
+# It was ten. Two real candidates each answered thirteen questions once
+# follow-ups were added, and both sessions ran well over an hour; of four
+# people who registered, two never finished one. Eight leaves room for the
+# agent's probes inside MAX_TOTAL_QUESTIONS without the interview sprawling.
+PLANNED_QUESTION_COUNT = 8
+
 
 def generate_questions(jd_result: dict, cv_result: dict, skill_gap: dict,
-                       num_questions: int = 10, language: str = "en") -> dict:
+                       num_questions: int = PLANNED_QUESTION_COUNT,
+                       language: str = "en",
+                       soft_count: int = SOFT_QUESTION_COUNT) -> dict:
     """
     Phase 2: Generate strategic interview questions balanced between the
     candidate's skill gap and the skills they already claim. The model only
@@ -1113,6 +1208,9 @@ def generate_questions(jd_result: dict, cv_result: dict, skill_gap: dict,
     """
     gap_count = round(num_questions * _GAP_QUESTION_RATIO)
     existing_count = num_questions - gap_count
+    # Never let the behavioural quota swallow the whole interview, however the
+    # caller sets it.
+    soft_count = max(0, min(soft_count, num_questions - 1))
 
     user_prompt = (
         f"JD required skills: {json.dumps(jd_result, ensure_ascii=False)}\n\n"
@@ -1124,6 +1222,7 @@ def generate_questions(jd_result: dict, cv_result: dict, skill_gap: dict,
             num_questions=num_questions,
             gap_count=gap_count,
             existing_count=existing_count,
+            soft_count=soft_count,
         ),
         language,
     )
@@ -1543,26 +1642,48 @@ def evaluate_answer(question: str, answer: str, targets_skill: str,
             return {"error": f"Answer evaluation returned a non-numeric '{field}'.",
                     "raw_output": parsed}
 
-    score = (
-        _ANSWER_WEIGHTS["technical_accuracy"] * parsed["technical_accuracy"]
-        + _ANSWER_WEIGHTS["relevance"] * parsed["relevance"]
-        + _ANSWER_WEIGHTS["depth"] * parsed["depth"]
-        + _ANSWER_WEIGHTS["technical_density"] * technical_density
-        + _ANSWER_WEIGHTS["substance"] * substance
-    ) - filler_penalty
+    # An answer that scores zero on BOTH relevance and depth did not engage
+    # with the skill at all — typically it answered a different question well.
+    # Three of the five criteria (accuracy, density, substance) never ask what
+    # the answer is *about*, so a fluent off-topic reply still collects 0.55 of
+    # the weight: measured, an expert PostgreSQL answer to a Kubernetes question
+    # scored 0.45 and would have been filed as "adequate at Kubernetes" for a
+    # candidate who never mentioned it.
+    #
+    # The paradox is that the stronger the candidate, the worse the error: a
+    # weak off-topic answer stays under the threshold on its own, while a good
+    # one is promoted. So the score is zeroed and flagged — and the flag is the
+    # point. "Not tested" is a different fact from "does not know", exactly as
+    # a NULL final score differs from a stored 0, and the report must not turn
+    # the first into the second.
+    skill_untested = parsed["relevance"] == 0.0 and parsed["depth"] == 0.0
+    if skill_untested:
+        score = 0.0
+    else:
+        score = (
+            _ANSWER_WEIGHTS["technical_accuracy"] * parsed["technical_accuracy"]
+            + _ANSWER_WEIGHTS["relevance"] * parsed["relevance"]
+            + _ANSWER_WEIGHTS["depth"] * parsed["depth"]
+            + _ANSWER_WEIGHTS["technical_density"] * technical_density
+            + _ANSWER_WEIGHTS["substance"] * substance
+        ) - filler_penalty
 
     return {
         "final_score": round(max(0.0, min(1.0, score)), 3),
         "is_soft_skill": False,
         "substance": substance,
         "skill_addressed": True,
+        "skill_untested": skill_untested,
         "technical_density": technical_density,
         "filler_count": filler_count,
         "filler_penalty": filler_penalty,
         "technical_accuracy": parsed["technical_accuracy"],
         "relevance": parsed["relevance"],
         "depth": parsed["depth"],
-        "feedback": parsed.get("feedback", ""),
+        "feedback": (
+            "This answer did not address the skill being asked about, so it "
+            "carries no evidence either way — the skill was not tested."
+            if skill_untested else parsed.get("feedback", "")),
         "llm_called": True,
     }
 

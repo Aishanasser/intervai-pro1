@@ -1298,7 +1298,7 @@ def _rtl(text: str) -> str:
     return f"<span class='rtl' style='display:block;'>{text}</span>"
 
 
-def _skill_verdict(avg: float) -> tuple:
+def _skill_verdict(avg: float, untested: bool = False) -> tuple:
     """Colour and wording for one skill in the final report.
 
     The two cut-offs are imported from ai_engine rather than chosen here, and
@@ -1307,7 +1307,13 @@ def _skill_verdict(avg: float) -> tuple:
     it probes deeper. Reusing them means the report cannot call a skill
     "solid" that the agent walked away from mid-interview — the candidate
     reads the same judgement the system acted on.
+
+    `untested` is separate from any score. Every answer on this skill missed
+    the topic, so nothing was learned about it — and "we did not find out" must
+    not be printed as "weak", which is a claim about the candidate.
     """
+    if untested:
+        return _muted, "not tested — the answer did not address it"
     if avg < ANSWER_WEAK_THRESHOLD:
         return _c_red, "weak — needs work"
     if avg > ANSWER_STRONG_THRESHOLD:
@@ -1835,6 +1841,7 @@ def render_interview():
                     "targets_skill": current_q.get("targets_skill", ""),
                     "score": score,
                     "feedback": feedback,
+                    "skill_untested": evaluation.get("skill_untested", False),
                     "route": cycle.get("route"),
                     "reason": cycle.get("reason", ""),
                     "thought": cycle.get("thought", ""),
@@ -1942,15 +1949,22 @@ def render_interview():
                 # Per-skill, worst first — the point of the report is what to
                 # go and fix, not a compliment.
                 by_skill = {}
+                # A skill counts as untested only when EVERY answer on it missed
+                # the topic. One off-topic answer among several still leaves
+                # evidence, so the average stands.
+                untested_skill = {}
                 for a in answers:
                     if isinstance(a.get("score"), (int, float)):
-                        by_skill.setdefault(a.get("targets_skill") or "general", []).append(a["score"])
+                        key = a.get("targets_skill") or "general"
+                        by_skill.setdefault(key, []).append(a["score"])
+                        untested_skill[key] = (untested_skill.get(key, True)
+                                               and bool(a.get("skill_untested")))
                 rows = sorted(((s, sum(v) / len(v)) for s, v in by_skill.items()),
                               key=lambda x: x[1])
                 body = "".join(
                     "<p><b>• {}:</b> {:.0f}% &nbsp;<span style='color:{};"
                     "font-size:0.85rem;'>{}</span></p>".format(
-                        skill, avg * 100, *_skill_verdict(avg))
+                        skill, avg * 100, *_skill_verdict(avg, untested_skill.get(skill, False)))
                     for skill, avg in rows
                 ) or f"<p style='color:{_muted};'>No answers were evaluated.</p>"
                 st.markdown(
@@ -1979,7 +1993,7 @@ def render_interview():
             if todo:
                 items = ""
                 for skill, avg in todo:
-                    colour, label = _skill_verdict(avg)
+                    colour, label = _skill_verdict(avg, untested_skill.get(skill, False))
                     items += (
                         f"<p style='margin:14px 0 4px;'><b>• {skill}</b> "
                         f"<span style='color:{colour}; font-size:0.85rem;'>"
