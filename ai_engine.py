@@ -1527,17 +1527,26 @@ def _evaluate_soft_answer(question: str, answer: str, targets_skill: str,
                     "raw_output": parsed}
 
     star_completeness = _score_star_completeness(parsed)
-    score = (
-        _SOFT_ANSWER_WEIGHTS["star_completeness"] * star_completeness
-        + _SOFT_ANSWER_WEIGHTS["relevance"] * parsed["relevance"]
-        + _SOFT_ANSWER_WEIGHTS["depth"] * parsed["depth"]
-        + _SOFT_ANSWER_WEIGHTS["substance"] * substance
-    ) - filler_penalty
+    # Same rule as the technical path: an episode that does not answer the
+    # question asked is no evidence about the behaviour being probed, however
+    # well told it is. Without this, a fluent story about the wrong thing still
+    # collects the substance weight and part of the STAR score.
+    skill_untested = parsed["relevance"] == 0.0
+    if skill_untested:
+        score = 0.0
+    else:
+        score = (
+            _SOFT_ANSWER_WEIGHTS["star_completeness"] * star_completeness
+            + _SOFT_ANSWER_WEIGHTS["relevance"] * parsed["relevance"]
+            + _SOFT_ANSWER_WEIGHTS["depth"] * parsed["depth"]
+            + _SOFT_ANSWER_WEIGHTS["substance"] * substance
+        ) - filler_penalty
 
     return {
         "final_score": round(max(0.0, min(1.0, score)), 3),
         "is_soft_skill": True,
         "substance": substance,
+        "skill_untested": skill_untested,
         "skill_addressed": None,        # not applicable — see evaluate_answer
         "technical_density": None,      # not applicable to a behavioural answer
         "filler_count": filler_count,
@@ -1547,7 +1556,10 @@ def _evaluate_soft_answer(question: str, answer: str, targets_skill: str,
         "technical_accuracy": None,     # nothing to be factually right about
         "relevance": parsed["relevance"],
         "depth": parsed["depth"],
-        "feedback": parsed.get("feedback", ""),
+        "feedback": (
+            "This answer did not address the skill being asked about, so it "
+            "carries no evidence either way — the skill was not tested."
+            if skill_untested else parsed.get("feedback", "")),
         "llm_called": True,
     }
 
@@ -1656,7 +1668,15 @@ def evaluate_answer(question: str, answer: str, targets_skill: str,
     # point. "Not tested" is a different fact from "does not know", exactly as
     # a NULL final score differs from a stored 0, and the report must not turn
     # the first into the second.
-    skill_untested = parsed["relevance"] == 0.0 and parsed["depth"] == 0.0
+    # Relevance alone. The first version also required depth == 0, on the
+    # assumption that an off-topic answer would be shallow — but depth measures
+    # how developed the answer is, not what it is about. Measured: an expert
+    # PostgreSQL answer to a Kubernetes question came back relevance 0.0 with
+    # depth 1.0, so the conjunction never fired and the answer was filed as
+    # "adequate at Kubernetes" at 0.65. Depth and topic are independent, and
+    # only relevance asks whether this is an answer to the question that was
+    # actually put.
+    skill_untested = parsed["relevance"] == 0.0
     if skill_untested:
         score = 0.0
     else:

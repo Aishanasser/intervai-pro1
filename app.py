@@ -655,14 +655,16 @@ def init_db():
         # session was being counted as a real 0% — dragging the candidate's
         # average down and showing "declining" on the progress panel. NULL is
         # the only value that means "no score yet".
-        cursor.execute('''
-            SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'interviews'
-              AND COLUMN_NAME = 'score'
-        ''', (DB_CONFIG["database"],))
-        row = cursor.fetchone()
-        if row and row[0] is not None:
-            cursor.execute("ALTER TABLE interviews ALTER COLUMN score DROP DEFAULT")
+        #
+        # SET DEFAULT NULL, not DROP DEFAULT. Dropping the default removes the
+        # implicit DEFAULT NULL along with the 0, and Aiven runs with
+        # STRICT_ALL_TABLES: an INSERT that omits a column with no default at
+        # all then fails outright with "Field 'score' doesn't have a default
+        # value" — even though the column is nullable. That is exactly what
+        # create_interview_session() does, so the earlier DROP DEFAULT stopped
+        # the platform from starting any new interview at all. This statement
+        # is idempotent, so it also repairs a database left in that state.
+        cursor.execute("ALTER TABLE interviews ALTER COLUMN score SET DEFAULT NULL")
 
         # Resume support. Everything an in-progress interview needs lives in
         # st.session_state, which is per browser session and is wiped by a

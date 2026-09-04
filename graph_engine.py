@@ -355,6 +355,20 @@ def run_answer_cycle(question: dict, answer: str, cv_skills: dict,
             f"  depth             = {evaluation['depth']}\n"
         )
 
+    # A zero means one of two different things, and the agent cannot act well
+    # on the number alone. Before the evaluator zeroed off-topic answers, an
+    # expert reply to the wrong question scored 0.45 and the agent read the
+    # partial credit correctly — it re-asked the question, reasoning that there
+    # was "no signal on this skill yet". Zeroing the score made the report
+    # honest but took that signal away: the same answer now reads as 0.0, which
+    # looks like "does not know", and the agent abandons a skill that was never
+    # actually tested. So the reason is stated in words.
+    untested_note = ("\n  NOTE: the answer did not address the skill at all "
+                     "(relevance 0.0). This is NOT evidence that the candidate "
+                     "lacks the skill — it was never tested. Re-asking the "
+                     "question is usually better than moving on.\n"
+                     if evaluation.get("skill_untested") else "")
+
     briefing = (
         f"Skill just probed: {targets_skill}\n"
         f"Question asked: {question.get('question', '')}\n"
@@ -362,7 +376,8 @@ def run_answer_cycle(question: dict, answer: str, cv_skills: dict,
         f"Evaluation:\n"
         f"  final_score       = {evaluation['final_score']}\n"
         f"{criteria}"
-        f"  filler_words      = {evaluation['filler_count']}\n\n"
+        f"  filler_words      = {evaluation['filler_count']}\n"
+        f"{untested_note}\n"
         f"Interview so far: {ctx['asked_count']} asked, "
         f"{ctx['budget_left']} left, probe depth on this skill "
         f"{ctx['probe_depth']}/{MAX_PROBE_DEPTH}, "
