@@ -398,6 +398,91 @@ def extract_jd_requirements(jd_text: str) -> dict:
 _SEMANTIC_MODEL = None
 _GAP_SIMILARITY_THRESHOLD = 0.6
 
+# Cosine similarity answers "are these two phrases alike?" — but the question a
+# skill gap actually asks is "does this tool count as that requirement?", and
+# the two come apart. Measured on the current model:
+#
+#     Cloud experience        <-> AWS          0.48   should match, does not
+#     container orchestration <-> Kubernetes   0.42   should match, does not
+#     Python                  <-> Java         0.45   should NOT match
+#
+# The wrong pair scores higher than two right ones, so no single threshold
+# separates them. Four models were tried — including retrieval-trained and
+# larger ones — and none separated the classes; the deepest was the worst
+# (gap -0.23 against -0.19). The limitation is the kind of relation, not the
+# capacity of the model, so a bigger model does not fix it.
+#
+# Hence two tracks. Similarity still decides everything it decides reliably —
+# a near-identical phrase above _GAP_CLEAR_MATCH, an unrelated one below
+# _GAP_CLEAR_MISS — and only the band between them is referred to the language
+# model, batched into a single call per interview.
+#
+# This does not reintroduce self-preference bias. That bias appears when the
+# model grades its OWN output; here it is asked a fact about the world (is AWS
+# a kind of cloud), with nothing of its own at stake.
+_GAP_CLEAR_MATCH = 0.75
+_GAP_CLEAR_MISS = 0.25
+
+NL = chr(10)
+
+GAP_COVERAGE_PROMPT = """You decide whether a candidate already covers a
+required skill, given the skills their CV lists.
+
+A requirement counts as COVERED when a skill the candidate has is that
+requirement, or is a specific instance of it:
+
+  "Cloud experience"        is covered by AWS, Azure or GCP
+  "container orchestration" is covered by Kubernetes
+  "version control"         is covered by Git
+  "relational database"     is covered by PostgreSQL or MySQL
+
+A requirement is NOT covered merely because the candidate has something in the
+same field. Two different tools are two different skills:
+
+  "Kubernetes" is NOT covered by Docker
+  "Python"     is NOT covered by Java
+  "Redis"      is NOT covered by PostgreSQL
+
+Judge each requirement independently. When genuinely unsure, answer "missing" —
+asking a candidate about a skill they have wastes one question, while assuming
+a skill they lack leaves a real gap untested.
+
+Return only JSON, no preamble:
+
+{
+  "covered": ["requirement", ...],
+  "missing": ["requirement", ...]
+}
+
+Every requirement given to you must appear in exactly one of the two lists,
+copied verbatim.
+"""
+
+
+def _resolve_grey_skills(grey: list, candidate_skills: list) -> tuple:
+    """Ask the model which of `grey` the candidate already covers.
+
+    Returns (covered, missing). On any failure returns ([], grey) — treating an
+    unresolved requirement as missing, which is the conservative side: the
+    candidate gets asked about something they may already know, rather than a
+    genuine gap going untested.
+    """
+    user_prompt = (
+        "Skills the candidate has:" + NL
+        + json.dumps(candidate_skills, ensure_ascii=False) + NL + NL
+        + "Requirements to judge:" + NL
+        + json.dumps(grey, ensure_ascii=False)
+    )
+    parsed = _call_llm_json(GAP_COVERAGE_PROMPT, user_prompt)
+    if "error" in parsed:
+        return [], list(grey)
+    covered = parsed.get("covered")
+    if not isinstance(covered, list):
+        return [], list(grey)
+    covered_set = {str(c).strip().lower() for c in covered}
+    keep = [g for g in grey if g.strip().lower() in covered_set]
+    return keep, [g for g in grey if g not in keep]
+
 # Languages are extracted with their proficiency wording attached, because the
 # candidate should see "Fluent in written and spoken English" rather than a
 # bare "English". But that wording is noise when MATCHING: a JD asking for
@@ -511,12 +596,23 @@ def compute_skill_gap(candidate_result: dict, jd_result: dict) -> dict:
         from sentence_transformers import util
         similarity_matrix = util.cos_sim(jd_embeddings, candidate_embeddings)
 
-        missing = []
+        missing, grey = [], []
         for i, jd_skill in enumerate(jd_skills):
-            best_match_score = similarity_matrix[i].max().item()
-            if best_match_score < _GAP_SIMILARITY_THRESHOLD:
-                missing.append(jd_skill)
-        gap[gap_key] = missing
+            best = similarity_matrix[i].max().item()
+            if best >= _GAP_CLEAR_MATCH:
+                continue                      # clearly covered
+            if best <= _GAP_CLEAR_MISS:
+                missing.append(jd_skill)      # clearly absent
+            else:
+                grey.append(jd_skill)         # similarity cannot tell
+
+        if grey:
+            _, still_missing = _resolve_grey_skills(grey, candidate_skills)
+            missing.extend(still_missing)
+
+        # Reported in the JD order rather than code-first then model-first, so
+        # the list reads the same whichever track decided each entry.
+        gap[gap_key] = [s for s in jd_skills if s in missing]
 
     return gap
 
