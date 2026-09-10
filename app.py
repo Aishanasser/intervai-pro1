@@ -11,7 +11,8 @@ import pandas as pd
 load_dotenv()
 from pypdf import PdfReader
 from ai_engine import (extract_skills, normalize_text, detect_language,
-                       ANSWER_WEAK_THRESHOLD, ANSWER_STRONG_THRESHOLD)
+                       ANSWER_WEAK_THRESHOLD, ANSWER_STRONG_THRESHOLD,
+                       MAX_TOTAL_QUESTIONS)
 from graph_engine import run_cv_jd_pipeline    # LangGraph pipeline — fixed path
 from react_agent import run_answer_cycle       # ReAct agent — the model decides
 
@@ -1840,7 +1841,18 @@ def render_interview():
 
         queue = st.session_state.interview_queue
         curr_idx = st.session_state.current_question
-        total_qs = len(queue)
+        # The ceiling is applied here, to the number of questions the interview
+        # will actually ask, and not only inside the agent. The agent's check
+        # stops it from ADDING a question once MAX_TOTAL_QUESTIONS have been
+        # asked — but every follow-up it inserted earlier pushed the planned
+        # questions back, and those were still asked afterwards. A real
+        # interview reached 13 questions against a ceiling of 12, and the
+        # ceiling's own message ("13/12 asked") appeared only on the question
+        # it should have prevented. Capping total_qs makes is_last fire at
+        # question 12, so the interview finalises there whatever the queue
+        # still holds; budget_left, passed to the agent below, is then measured
+        # against the same limit the interview really enforces.
+        total_qs = min(len(queue), MAX_TOTAL_QUESTIONS)
 
         if curr_idx < total_qs:
             current_q = queue[curr_idx]
