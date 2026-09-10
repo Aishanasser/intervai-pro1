@@ -994,18 +994,23 @@ def _build_skill_vocabulary(jd_result: dict, cv_result: dict) -> set:
     return vocab
 
 
-def _count_named_entities(question_text: str, vocabulary: set) -> int:
-    """Count DISTINCT known skills named in the question. Matching runs
-    longest-first and masks each match, so a short skill nested inside a
-    longer one ("SQL" inside "SQL databases") is not counted twice."""
+def _matched_terms(question_text: str, vocabulary: set) -> set:
+    """Which DISTINCT known skills the text names. Matching runs longest-first
+    and masks each match, so a short skill nested inside a longer one ("SQL"
+    inside "SQL databases") is not returned twice."""
     text = question_text.lower()
-    count = 0
+    found = set()
     for skill in sorted(vocabulary, key=len, reverse=True):
         match = _word_boundary_search(skill.lower(), text)
         if match:
-            count += 1
+            found.add(skill)
             text = text[:match.start()] + " " * (match.end() - match.start()) + text[match.end():]
-    return count
+    return found
+
+
+def _count_named_entities(question_text: str, vocabulary: set) -> int:
+    """How many DISTINCT known skills the text names."""
+    return len(_matched_terms(question_text, vocabulary))
 
 
 def _target_is_named(question_text: str, targets_skill: str,
@@ -1371,24 +1376,50 @@ For EACH criterion, first state briefly what you observed, then assign a score
 between 0.0 and 1.0:
 
 1. "technical_accuracy" — Are the claims the candidate made TRUE?
-   Judge only correctness, never how much was said.
-   1.0 = everything stated is correct (even if only one sentence was stated)
-   0.5 = mostly correct with an imprecision
-   0.0 = contains a clear technical error, or is factually wrong
-   Example: "Kubernetes manages containers and restarts them if they fail" is
-   brief but TRUE → technical_accuracy = 1.0 (and depth would be low).
+   Ask FIRST whether there is a claim to judge. An answer that asserts nothing
+   cannot be wrong, and must not collect this mark for being unfalsifiable.
+   Naming the topic, restating the question, and saying the answer "depends on
+   the situation" or "depends on the requirements" are not claims: nothing in
+   them could turn out to be false.
+   Then, and only then, judge correctness — never how much was said.
+   1.0 = a checkable claim was made and everything stated is correct
+   0.5 = a checkable claim was made and is mostly correct, with an imprecision
+   0.0 = a clear technical error, OR no checkable claim was made at all
+   Example of 1.0: "Kubernetes manages containers and restarts them if they
+   fail" is brief but TRUE → 1.0 (and depth would be low).
+   Example of 0.0: "Choosing between PID and state-space really depends on the
+   control algorithm and the trade-offs involved" → 0.0. It commits to
+   nothing, so there is nothing here that could be right.
 
-2. "relevance" — Does the answer address the question that was asked?
-   Judge only topic match, never completeness.
-   1.0 = it is about what was asked   0.5 = partly, or drifts to a near topic
-   0.0 = it is about something else entirely
-   Example: a brief answer that engages the right topic is still relevant.
+2. "relevance" — Is the answer ABOUT the subject the question asked about?
+   This is a topic test, not a completeness test. Interview questions here
+   usually ask for two or three things at once. Answering ONE of them, and
+   ignoring the rest, is still fully relevant — the missing parts are what
+   "depth" is for, and charging for them here would charge twice.
+   1.0 = it is about the subject asked about, however partially it is covered
+   0.5 = it drifts to a NEIGHBOURING subject (asked about embedded firmware,
+         answered about PLC ladder logic) — reserve 0.5 for a change of
+         subject, never for a short or partial answer
+   0.0 = it is about something else entirely, or it answers no question at all
+   Worked example: asked "how would you choose between PID and state-space,
+   and what trade-offs guide the decision", answered only "PID for simple
+   systems, state-space when there are many parameters" — the trade-offs half
+   is missing entirely, and relevance is still 1.0, because the answer is
+   about choosing between PID and state-space. Its shortfall belongs to depth.
 
-3. "depth" — How far below the surface does it go?
-   THIS is where brevity and superficiality are penalised.
-   1.0 = explains mechanisms, trade-offs, failure modes, or real experience
-   0.5 = correct but textbook-level, no mechanism explained
-   0.0 = a bare assertion with nothing behind it
+3. "depth" — How much REASONING is present behind the claim?
+   Ask only: did the candidate say WHY or HOW, at any level at all? This is
+   not a completeness scale and not a length scale — one sentence carrying a
+   real reason outranks a paragraph of restated question.
+   1.0 = trade-offs weighed, failure modes named, or real experience recounted
+   0.6 = the mechanism is explained, at textbook level
+   0.3 = a reason is given but not explained ("PID because it is easier to
+         tune") — this is the normal score for a correct, brief answer, and
+         it is NOT 0.0
+   0.0 = a bare assertion with no reason offered at all ("I would use PID"),
+         or nothing was answered
+   Do not reserve 0.0 for anything except a total absence of reasoning. If you
+   can name the reason the candidate gave, the score is at least 0.3.
 
 Do not reward confidence or polished phrasing on their own: a fluent answer
 that is factually wrong must still score 0.0 on technical_accuracy.
@@ -1582,15 +1613,272 @@ def _score_filler_penalty(answer_text: str, language: str = "en") -> tuple[int, 
     return count, round(penalty, 3)
 
 
-def _score_technical_density(answer_text: str, vocabulary: set) -> float:
-    """How many known skills/technologies the answer actually names. Reuses the
-    same counting used for question scoring, so the two stay consistent."""
-    named = _count_named_entities(answer_text, vocabulary)
-    if named == 0:
+# Words a generated interview question uses to frame itself rather than to name
+# its subject. They survive the length filter below, so they have to be listed.
+# The list is deliberately about question phrasing and holds nothing
+# field-specific — which is the point: the filter must not know in advance
+# whether the interview is about software, medicine or control systems.
+#
+# The cutoff below is five characters rather than seven. Seven was measured to
+# drop real terms of art that happen to be short: an accounting question about
+# reconciling a general ledger scored an answer naming ledger, journal entries
+# and accruals at density 0.0, because "ledger" is six letters. Lowering the
+# cutoff lets those in and lets more ordinary English in with them, which is
+# what the second half of this list is for.
+_QUESTION_FRAMING_WORDS = frozenset("""
+explain describe discuss outline consider compare contrast walk through
+specific specifically particular concrete example examples instance
+between within without through against during before after
+approach approaches method methods process processes practice practices
+decision decisions choice choices option options
+situation situations scenario scenarios challenge challenges problem problems
+encountered experienced designed implemented structured handled
+something anything everything nothing another
+different various several certain general overall
+require requires required requirement requirements
+include includes including included
+provide provides provided ensure ensures ensured
+would could should might
+your yours yourself
+excessively affects affecting characterise characterize differentiate
+governs governing quarterly monthly weekly yearly annual
+which these those there their theirs where when what whom whose
+using used uses given under while about above below
+other others another same such than then thus
+first second third final last next previous
+value values case cases step steps point points level levels
+would could should shall must need needs
+make makes made take takes taken give gives given
+work works working help helps helped
+part parts kind kinds type types form forms
+""".split())
+
+# Arabic question framing. The Latin patterns below match no Arabic at all, so
+# without this an Arabic interview extracts zero domain terms and falls back to
+# the skill labels alone — exactly the bias this function exists to remove,
+# reappearing on the Arabic side of a bilingual platform.
+_QUESTION_FRAMING_WORDS_AR = frozenset("""
+اشرح وضح صف قارن ناقش تحدث اذكر بيّن بين عدّد
+كيف لماذا متى أين ماذا هل الذي التي الذين اللذان
+عندما بينما حيث بحيث لكي حتى إذا لو كان كانت
+يمكن ينبغي يجب تستطيع تقدر تختار اختيار تفضل
+مثال أمثلة حالة حالات موقف مواقف مشكلة مشاكل
+طريقة طرق أسلوب أساليب خطوات خطوة عملية عمليات
+بعض جميع كل أي أية بعضها نفسه نفسها
+واجهت صممت نفذت تعاملت استخدمت
+الأول الثاني الثالث الأخير التالي السابق
+الحالة الحالات الأمر الأمور المرحلة المراحل الشيء الأشياء
+الوقت الأفضل الجيد الكثير القليل الجزء الأجزاء النوع الأنواع
+""".split())
+
+
+def _domain_terms_from_question(question_text: str) -> set:
+    """The technical vocabulary the SYSTEM ITSELF used when it wrote the question.
+
+    The skill vocabulary is built from extracted skill *labels*, and those come
+    from the job ad, which is written in recruiting language. Measured on a real
+    Control and Automation interview: the ad said "control algorithms", "PLCs",
+    "sensors, actuators" — and never once said PID, state-space, PWM, ADC,
+    controllability or observability. The question generator, meanwhile, wrote
+    all six into its questions, because expanding an HR-level skill into real
+    domain vocabulary is exactly what generating a technical question means.
+
+    So the system asked about PID and then scored an answer that said "PID" as
+    naming nothing technical at all. Across the stored interviews the bias is
+    measurable: mean technical_density 0.37 on Software/Backend roles against
+    0.04 on Control/RF ones — one system, nine times harsher on the domain whose
+    practitioners speak in concepts rather than in product names.
+
+    The reference set is therefore widened from the labels to the labels plus
+    the terms the question itself introduced. This is not a licence to parrot:
+    of the six terms those questions introduced the candidate used four and
+    ignored PWM, ADC and scan cycle, and only what is actually said is counted.
+    """
+    if not question_text:
+        return set()
+    terms = set()
+    # Acronyms are reliable here in a way they are not in a transcribed answer:
+    # the question is machine-written, so its capitalisation is intact.
+    terms.update(re.findall(r"\b[A-Z][A-Za-z0-9]*[A-Z0-9]\b", question_text))
+    # Hyphenated compounds are almost always terms of art — "state-space",
+    # "zero-order", "closed-loop" — and never question framing.
+    terms.update(re.findall(r"\b\w+(?:-\w+)+\b", question_text))
+    # Remaining single words that are not the question's own scaffolding.
+    for word in re.findall(r"\b[a-z]{5,}\b", question_text.lower()):
+        if word not in _QUESTION_FRAMING_WORDS:
+            terms.add(word)
+    # Arabic runs through the same rule with its own framing list. Without this
+    # branch the Latin patterns above match nothing and an Arabic interview
+    # extracts no domain vocabulary at all, so the bias this function removes on
+    # the English side survives untouched on the Arabic one.
+    for word in re.findall(r"[ء-ي]{4,}", question_text):
+        if word not in _QUESTION_FRAMING_WORDS_AR:
+            terms.add(word)
+    return {t for t in terms if len(t) >= 3}
+
+
+# Below this length an answer with no recognised term is a non-answer, not an
+# expert using vocabulary of their own, and asking the model about it would buy
+# nothing. "i dont know" is three words.
+_DENSITY_ESCALATION_MIN_WORDS = 12
+
+TERMINOLOGY_DENSITY_PROMPT = """You are reading one answer given in a technical
+job interview.
+
+List the DOMAIN-SPECIFIC technical terms the candidate used — the vocabulary a
+practitioner of this field would recognise as belonging to the field, and an
+outsider would not. Include terms of art, named methods, named components,
+quantities and units, and standard abbreviations.
+
+Do NOT include:
+  - ordinary words, however long ("important", "complicated", "requirements")
+  - words that merely repeat the question's own phrasing
+  - names of soft skills or of the job title
+
+List only terms that ACTUALLY APPEAR in the answer. Do not add terms the
+candidate should have used. If the answer contains none, return an empty list.
+
+Return only JSON — no preamble, no explanation, no markdown code fences.
+
+Output format:
+
+{{
+  "terms": ["string", "string"]
+}}
+"""
+
+
+# The count at which the density criterion reaches full marks. Measured over 35
+# real answers: the median names 3 terms, 77% name four or fewer, the richest
+# names 13. Saturating at 6 puts the median answer at the middle of the scale
+# and leaves range above it for the top fifth.
+#
+# The previous cutoff was 2, which pinned 66% of all answers at 1.0 — the same
+# disease "depth" had, inverted: a criterion that returns the same value for
+# most cases has stopped separating them. A brief but correct answer naming PID
+# and state-space and an expert answer naming SISO, anti-windup, MIMO, pole
+# placement, a Luenberger observer and a Nyquist margin both scored 1.0 here,
+# and the two answers finished on exactly the same final score of 0.830.
+_DENSITY_SATURATION = 6
+
+
+# Measured on 24 real answers of 25 words or more: the highest echo ratio any
+# of them reaches is 0.308, against 0.650 for an answer built to restate the
+# question. The gate sits between them with room on both sides. Answers under
+# _ECHO_MIN_WORDS are exempt — a short answer necessarily reuses the question's
+# nouns, and the corpus high of 0.600 is a fifteen-word answer that does
+# commit to something.
+_ECHO_MAX_RATIO = 0.50
+_ECHO_MIN_WORDS = 25
+
+
+def _content_words(text: str) -> list:
+    """The words in a text that carry subject matter, in both scripts. Framing
+    words are dropped so that "explain", "would" and "اشرح" cannot make an
+    answer look substantive."""
+    words = [w for w in re.findall(r"[a-z]{4,}", text.lower())
+             if w not in _QUESTION_FRAMING_WORDS]
+    words += [w for w in re.findall(r"[ء-ي]{3,}", text)
+              if w not in _QUESTION_FRAMING_WORDS_AR]
+    return words
+
+
+def _echo_ratio(answer_text: str, question_text: str) -> float:
+    """What share of the answer's subject words the question already supplied.
+
+    A candidate who restates the question makes no claim, so nothing in the
+    answer can be false — and "technical_accuracy" therefore hands them full
+    marks for being unfalsifiable. Measured over five runs on one such answer:
+    the model called it relevant twice and accurate three times, and the final
+    score ranged from 0.000 to 0.800 on identical input. The three criteria
+    meant to catch it are all model-judged, so none of them can be relied on.
+
+    This one is arithmetic. It asks only how much of the answer is the
+    question coming back, which is a fact about two strings and the same on
+    every run.
+    """
+    answer_words = _content_words(answer_text)
+    if not answer_words:
         return 0.0
-    if named == 1:
-        return 0.5
-    return 1.0
+    question_words = set(_content_words(question_text))
+    echoed = sum(1 for w in answer_words if w in question_words)
+    return round(echoed / len(answer_words), 3)
+
+
+def _band_term_count(named: float) -> float:
+    """Number of distinct terms named → a 0-1 score, linear up to saturation.
+
+    Both paths — the code count and the model's list — return through here, so
+    the scale is the same whichever produced the count. The count is a float
+    because an echoed term counts for half of one the candidate brought.
+    """
+    if named <= 0:
+        return 0.0
+    return round(min(1.0, named / _DENSITY_SATURATION), 3)
+
+
+def _llm_terminology_density(answer_text: str, question_text: str) -> float:
+    """Ask the model which domain terms the answer used, then count them here.
+
+    The division of labour is deliberate and matches the rest of this module:
+    the model IDENTIFIES terms, which is a language judgement it is good at,
+    and the code COUNTS and bands them, which keeps the number out of the
+    model's hands. Asking it for a 0-1 density directly would reproduce the
+    self-rating clustering documented in Phase 2.
+    """
+    parsed = _call_llm_json(
+        TERMINOLOGY_DENSITY_PROMPT,
+        f"Interview question:\n{question_text}\n\nCandidate's answer:\n{answer_text}")
+    terms = parsed.get("terms")
+    if not isinstance(terms, list):
+        return 0.0            # conservative: a failed call never invents credit
+    named = len({t.strip().lower() for t in terms
+                 if isinstance(t, str) and t.strip()
+                 and _word_boundary_search(t.strip().lower(), answer_text.lower())})
+    return _band_term_count(named)
+
+
+def _score_technical_density(answer_text: str, vocabulary: set,
+                             question_text: str = "") -> float:
+    """How many known skills/technologies the answer actually names. Reuses the
+    same counting used for question scoring, so the two stay consistent — and
+    counts against the question's own domain vocabulary as well as the extracted
+    skill labels, for the reason set out in _domain_terms_from_question.
+
+    String matching alone was measured to invert the thing it means to reward.
+    Asked to choose between PID and state-space, an answer that repeats the
+    question's own words scored 1.0, while two expert answers naming SISO,
+    MIMO, anti-windup, pole placement, a Luenberger observer, Nyquist margin,
+    minimum phase and modal decomposition both scored 0.0 — none of those terms
+    was in the question, so none was in the reference set. The parrot beat the
+    practitioner.
+
+    So a count of zero is no longer taken as an answer. It is the one case
+    string matching cannot decide, and only that case is escalated to the model
+    — a substantive answer that named nothing recognised is exactly the
+    signature of an expert using vocabulary of their own. Short answers are not
+    escalated: "i dont know" needs no second opinion, and the guard keeps the
+    added cost to the rare case that motivates it.
+
+    The count is then graded rather than banded into thirds — see
+    _DENSITY_SATURATION for why, and for what the old cutoff at two was doing.
+
+    A term the question already supplied counts for half of one the candidate
+    brought. Repeating "PID" back at a question about PID shows the candidate
+    is on the right subject and no more, while naming anti-windup unprompted is
+    evidence of knowing the field. Without the discount an answer made entirely
+    of the question's own words collected full marks on this criterion in every
+    one of five runs — the one criterion here that is deterministic was
+    deterministically wrong.
+    """
+    reference = set(vocabulary) | _domain_terms_from_question(question_text)
+    matched = _matched_terms(answer_text, reference)
+    if not matched and len(answer_text.split()) >= _DENSITY_ESCALATION_MIN_WORDS:
+        return _llm_terminology_density(answer_text, question_text)
+    question_lower = (question_text or "").lower()
+    own = sum(1 for t in matched
+              if not _word_boundary_search(t.lower(), question_lower))
+    return _band_term_count(own + 0.5 * (len(matched) - own))
 
 
 def _score_star_completeness(parsed: dict) -> float:
@@ -1727,13 +2015,51 @@ def evaluate_answer(question: str, answer: str, targets_skill: str,
             "llm_called": False,
         }
 
+    # --- the question, handed back ----------------------------------------
+    # An answer long enough to have said something, made mostly of the words
+    # the question supplied, has said nothing. It is not caught by any of the
+    # three model-judged criteria: it asserts nothing, so "technical_accuracy"
+    # cannot fault it; it names the right subject, so "relevance" reads as
+    # high. Run five times on one such answer the final score came back 0.000,
+    # 0.000, 0.450, 0.000 and 0.800 — the protection existed but was a coin
+    # toss.
+    #
+    # The thresholds are measured, not chosen. Across 24 real answers of 25
+    # words or more the highest echo ratio is 0.308, while the constructed
+    # echo sits at 0.650 — better than double the margin. Short answers are
+    # exempt because a brief answer reuses the question's nouns by necessity:
+    # the highest echo in the whole corpus, 0.600, is a fifteen-word answer
+    # that does commit to something.
+    echo_ratio = _echo_ratio(answer, question)
+    if (echo_ratio >= _ECHO_MAX_RATIO
+            and len(answer.split()) >= _ECHO_MIN_WORDS):
+        return {
+            "final_score": 0.0,
+            "is_soft_skill": is_soft_skill,
+            "substance": substance,
+            "skill_addressed": skill_addressed,
+            "answer_is_echo": True,
+            "echo_ratio": echo_ratio,
+            "technical_density": 0.0,
+            "filler_count": filler_count,
+            "filler_penalty": 0.0,
+            "technical_accuracy": None,
+            "relevance": None,
+            "depth": None,
+            "feedback": ("This answer restates the question rather than "
+                         "answering it. Say what you would actually do, and "
+                         "why — one concrete step is worth more than a "
+                         "paragraph that names the topic again."),
+            "llm_called": False,
+        }
+
     # --- behavioural questions take the STAR rubric ------------------------
     if is_soft_skill:
         return _evaluate_soft_answer(question, answer, targets_skill,
                                      substance, filler_count, filler_penalty,
                                      language)
 
-    technical_density = _score_technical_density(answer, vocabulary)
+    technical_density = _score_technical_density(answer, vocabulary, question)
 
     user_prompt = (
         f"Skill being probed: {targets_skill}\n\n"

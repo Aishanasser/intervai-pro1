@@ -12,7 +12,8 @@ load_dotenv()
 from pypdf import PdfReader
 from ai_engine import (extract_skills, normalize_text, detect_language,
                        ANSWER_WEAK_THRESHOLD, ANSWER_STRONG_THRESHOLD)
-from graph_engine import run_cv_jd_pipeline, run_answer_cycle
+from graph_engine import run_cv_jd_pipeline    # LangGraph pipeline — fixed path
+from react_agent import run_answer_cycle       # ReAct agent — the model decides
 
 st.set_page_config(
     page_title="IntervAI Pro | AI Interview Platform",
@@ -554,6 +555,14 @@ _DB_SSL_CA = os.getenv("DB_SSL_CA", "").strip()
 if _DB_SSL_CA:
     DB_CONFIG["ssl_ca"] = _DB_SSL_CA
     DB_CONFIG["ssl_verify_cert"] = True
+
+# Speak the MySQL protocol in Python rather than through the connector's C
+# extension. The extension is preferred automatically whenever it imports, and
+# on Windows under Python 3.14 its TLS handshake dereferences a bad pointer:
+# the interpreter dies with an access violation instead of raising, so the
+# error is unreachable from Python and the page simply disappears. The pure
+# path is a few milliseconds slower per query and immune to that.
+DB_CONFIG["use_pure"] = True
 
 # Remembered so the failure is reported once per session rather than on every
 # rerun, which in Streamlit would mean on every keystroke.
@@ -1613,6 +1622,37 @@ def render_upload():
                     # it scores answers against.
                     st.session_state.jd_skills = pipeline_result.get("jd_skills", {})
                     st.session_state.generated_questions = pipeline_result.get("questions", {}).get("questions", [])
+                    _jd = st.session_state.jd_skills
+                    _n_jd = sum(len(_jd.get(k) or []) for k in
+                                ("technical_skills", "soft_skills", "languages"))
+                    st.success(f"Job description analyzed — {_n_jd} required "
+                               f"skills extracted.")
+
+    # The same view the CV gets in step 1. Until now the job's requirements were
+    # extracted and then shown only inside the gap card, where a skill appears
+    # solely when it is *missing* — so everything the CV already covered stayed
+    # invisible, and the extraction itself could not be checked. Listing both
+    # sides in the same shape makes them directly comparable.
+    if st.session_state.get("jd_skills"):
+        jd = st.session_state.jd_skills
+        jd_tech = jd.get("technical_skills") or []
+        jd_soft = jd.get("soft_skills") or []
+        jd_langs = jd.get("languages") or []
+        with st.expander(
+                f"View skills required by the job "
+                f"({len(jd_tech) + len(jd_soft) + len(jd_langs)})", expanded=True):
+            if jd_tech:
+                st.markdown("**Technical Skills**")
+                for skill in jd_tech:
+                    st.markdown(f"- {skill}")
+            if jd_soft:
+                st.markdown("**Soft Skills**")
+                for skill in jd_soft:
+                    st.markdown(f"- {skill}")
+            if jd_langs:
+                st.markdown("**Languages**")
+                for lang in jd_langs:
+                    st.markdown(f"- {lang}")
 
     if st.session_state.skill_gap:
         gap = st.session_state.skill_gap
@@ -1621,6 +1661,46 @@ def render_upload():
         missing_langs = gap.get("missing_languages", [])
         total_missing = len(missing_tech) + len(missing_soft) + len(missing_langs)
         with st.expander(f"Gap analysis result ({total_missing} missing skills)", expanded=True):
+            # The gap alone is a conclusion with its working hidden: a skill is
+            # listed as missing and there is no way to see what it was compared
+            # against. Showing the two source lists beside it makes the result
+            # checkable — a requirement marked missing that plainly matches
+            # something in the CV column is a visible bug, not a silent one.
+            jd_all = st.session_state.get("jd_skills") or {}
+            cv_all = st.session_state.get("cv_skills") or {}
+            gap_all = {s.strip().lower()
+                       for s in missing_tech + missing_soft + missing_langs}
+
+            def _column(title, data, mark_gap):
+                lines = []
+                for key, label in (("technical_skills", "Technical"),
+                                   ("soft_skills", "Soft"),
+                                   ("languages", "Languages")):
+                    items = data.get(key) or []
+                    if not items:
+                        continue
+                    lines.append(f"<p style='margin:10px 0 4px;'><b>{label}</b> "
+                                 f"<span style='color:{_muted};font-size:.8rem;'>"
+                                 f"({len(items)})</span></p>")
+                    for s in items:
+                        missing = mark_gap and s.strip().lower() in gap_all
+                        colour = _c_red if missing else _muted
+                        flag = " ✗" if missing else ""
+                        lines.append(
+                            f"<p style='margin:1px 0;font-size:.88rem;color:{colour};'>"
+                            f"• {s}{flag}</p>")
+                body = "".join(lines) or f"<p style='color:{_muted};'>—</p>"
+                return (f"<div class='premium-card'><h4>{title}</h4>{body}</div>")
+
+            side_jd, side_cv = st.columns(2)
+            with side_jd:
+                st.markdown(_column("📋 The job asks for", jd_all, True),
+                            unsafe_allow_html=True)
+            with side_cv:
+                st.markdown(_column("👤 Your CV shows", cv_all, False),
+                            unsafe_allow_html=True)
+            st.caption("✗ = required but not covered by anything in your CV")
+
             if total_missing == 0:
                 st.success("Your skills cover all the requirements visible in the job description! 🎉")
             else:
