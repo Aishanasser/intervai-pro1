@@ -27,19 +27,67 @@ FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
 # reproducible if the model behind it cannot be swapped underneath the name.
 MODEL_NAME = "accounts/fireworks/models/deepseek-v4-pro-0813"
 
-if not FIREWORKS_API_KEY:
+# The three settings above can be overridden from the environment, which is the
+# only thing the model-comparison experiment needs in order to point the whole
+# pipeline at a different provider or a different model. Nothing else changes:
+# the prompts, the matching, the thresholds and the scoring code are identical,
+# so any difference the experiment measures is the model's and not the harness's.
+#
+#   LLM_MODEL      full model id at the provider
+#   LLM_BASE_URL   provider endpoint (OpenAI's own is https://api.openai.com/v1)
+#   LLM_API_KEY    key for that provider; falls back to FIREWORKS_API_KEY
+#
+# Defaults are unchanged, so the platform behaves exactly as before when none of
+# them is set.
+MODEL_NAME = os.getenv("LLM_MODEL", MODEL_NAME)
+_BASE_URL = os.getenv("LLM_BASE_URL", FIREWORKS_BASE_URL)
+
+# The key follows the endpoint unless one is named explicitly. Without this the
+# two settings drift apart silently: pointing LLM_BASE_URL at OpenAI while the
+# key still resolved to FIREWORKS_API_KEY produced a 401 that reads like a bad
+# key rather than a mismatched pair.
+def _key_for(base_url: str) -> str:
+    if os.getenv("LLM_API_KEY"):
+        return os.getenv("LLM_API_KEY")
+    if "openai.com" in base_url:
+        return os.getenv("OPENAI_API_KEY") or ""
+    return FIREWORKS_API_KEY or ""
+
+_API_KEY = _key_for(_BASE_URL)
+
+# JSON mode is not universally supported: smaller and older models reject
+# response_format outright. The extraction prompts already state "return only
+# JSON", and _strip_code_fences handles a fenced reply, so the flag is an
+# optimisation rather than a requirement — and one that has to be switchable
+# for the comparison to be able to include models that lack it.
+_JSON_MODE = os.getenv("LLM_JSON_MODE", "1") != "0"
+
+# OpenAI's reasoning models refuse function tools on /v1/chat/completions:
+#
+#   "Function tools with reasoning_effort are not supported for gpt-5.6-terra
+#    in /v1/chat/completions. To use function tools, use /v1/responses or set
+#    reasoning_effort to 'none'."
+#
+# Both escapes were measured to work. Setting reasoning_effort to 'none' is the
+# smaller change but buys tool calling by switching the reasoning off — and the
+# agent exists precisely to reason about an answer before deciding. The
+# Responses API keeps the reasoning and the tools, so that is the one exposed
+# here. It is off by default because Fireworks does not serve that endpoint.
+_RESPONSES_API = os.getenv("LLM_RESPONSES_API", "0") == "1"
+
+if not _API_KEY:
     raise RuntimeError(
-        "FIREWORKS_API_KEY environment variable is not set. "
-        "Add it to your .env file or export it before running."
+        "No LLM API key found. Set FIREWORKS_API_KEY (or LLM_API_KEY) "
+        "in your .env file or export it before running."
     )
 
 client = ChatOpenAI(
     model=MODEL_NAME,
-    api_key=FIREWORKS_API_KEY,
-    base_url=FIREWORKS_BASE_URL,
+    api_key=_API_KEY,
+    base_url=_BASE_URL,
     temperature=0.0,  # deterministic: extraction task, not creative generation
     max_tokens=16384,
-    model_kwargs={"response_format": {"type": "json_object"}},
+    model_kwargs={"response_format": {"type": "json_object"}} if _JSON_MODE else {},
 )
 
 # A second client for the interview agent. It is identical except that it does
@@ -50,10 +98,11 @@ client = ChatOpenAI(
 # be auto-parsed".
 agent_client = ChatOpenAI(
     model=MODEL_NAME,
-    api_key=FIREWORKS_API_KEY,
-    base_url=FIREWORKS_BASE_URL,
+    api_key=_API_KEY,
+    base_url=_BASE_URL,
     temperature=0.0,
     max_tokens=16384,
+    **({"use_responses_api": True} if _RESPONSES_API else {}),
 )
 
 # ==========================================
