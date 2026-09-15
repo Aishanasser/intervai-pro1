@@ -470,7 +470,14 @@ _GAP_SIMILARITY_THRESHOLD = 0.6
 # model grades its OWN output; here it is asked a fact about the world (is AWS
 # a kind of cloud), with nothing of its own at stake.
 _GAP_CLEAR_MATCH = 0.75
-_GAP_CLEAR_MISS = 0.25
+# The multilingual model (which replaced all-MiniLM so that Arabic and mixed
+# English/Arabic CV-JD pairs are compared in one space) scores tool-to-category
+# relations lower than all-MiniLM did: AWS <-> cloud experience 0.21, Git <->
+# version control 0.20. At 0.25 those fell into "clearly missing" without the
+# language model ever seeing them. At 0.15 they reach the grey band instead;
+# lowering this bound can only send more items to the model, never mark a
+# skill covered that is not.
+_GAP_CLEAR_MISS = 0.15
 
 NL = chr(10)
 
@@ -579,7 +586,7 @@ def _get_semantic_model():
     global _SEMANTIC_MODEL
     if _SEMANTIC_MODEL is None:
         from sentence_transformers import SentenceTransformer
-        _SEMANTIC_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        _SEMANTIC_MODEL = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     return _SEMANTIC_MODEL
 
 
@@ -590,7 +597,7 @@ def compute_skill_gap(candidate_result: dict, jd_result: dict) -> dict:
     Job Description), and return the skills the JD asks for that the
     candidate doesn't appear to have.
 
-    Matching is semantic (via all-MiniLM-L6-v2 embeddings), not exact-string,
+    Matching is semantic (via multilingual MiniLM embeddings), not exact-string,
     since a JD saying "Cloud experience" should count as satisfied by a CV
     listing "AWS", and "Python" should match "python" regardless of wording —
     unlike the exact-match methodology used for Phase 1 F1 benchmarking.
