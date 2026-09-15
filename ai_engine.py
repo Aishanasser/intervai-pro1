@@ -469,15 +469,28 @@ _GAP_SIMILARITY_THRESHOLD = 0.6
 # This does not reintroduce self-preference bias. That bias appears when the
 # model grades its OWN output; here it is asked a fact about the world (is AWS
 # a kind of cloud), with nothing of its own at stake.
-_GAP_CLEAR_MATCH = 0.75
-# The multilingual model (which replaced all-MiniLM so that Arabic and mixed
-# English/Arabic CV-JD pairs are compared in one space) scores tool-to-category
-# relations lower than all-MiniLM did: AWS <-> cloud experience 0.21, Git <->
-# version control 0.20. At 0.25 those fell into "clearly missing" without the
-# language model ever seeing them. At 0.15 they reach the grey band instead;
-# lowering this bound can only send more items to the model, never mark a
-# skill covered that is not.
-_GAP_CLEAR_MISS = 0.15
+# Both bounds were calibrated, not chosen. 20 real job-ad x CV pairs (SkillSpan
+# ads x Resume-Corpus CVs, 266 requirements) were rendered in all four language
+# combinations -- English/English, Arabic/Arabic and both mixed directions --
+# by translating each side, and every requirement was labelled covered or not
+# by the language model (the same judge that settles the grey band).
+#
+# The highest score any UNCOVERED requirement reached was 0.90 ("agile
+# architecture" <-> "Agile Methodology"): similarity rises for related skills,
+# not only for equal ones. At 0.75, 2 to 7 requirements per combination were
+# declared covered that were not -- the costlier error, since it removes a real
+# gap from the interview. Above 0.92 there were none in any combination.
+#
+# The lowest score any COVERED requirement reached was 0.35 on that set, and
+# 0.12 on a smaller probe ("إكسل" <-> "Microsoft Excel": the same tool in
+# two scripts). 0.10 sits below both.
+#
+# With these bounds the embeddings settle only near-identical phrases (2-5 in
+# 100 requirements) and everything else reaches the model in the single
+# batched call per category that already existed, so the number of model calls
+# does not grow -- only the length of that one call.
+_GAP_CLEAR_MATCH = 0.92
+_GAP_CLEAR_MISS = 0.10
 
 NL = chr(10)
 
