@@ -561,12 +561,30 @@ _AR_PROFICIENCY_TERMS = (
     "بطلاقة", "طلاقة", "لغة الأم", "اللغة الأم", "الأم",
     "متقدم", "متقدّم", "متوسط", "متوسّط", "مبتدئ", "ممتاز",
     "جيد", "جيّد", "ضعيف", "محادثة", "كتابة", "قراءة",
-    "تحدث", "تحدّث", "مستوى", "إلمام", "أساسي", "لغة",
+    "تحدث", "تحدّث", "مستوى", "إلمام", "أساسي", "لغة", "اللغة",
+    "إجادة", "إتقان", "يجيد", "تجيد",
 )
 _PROFICIENCY_WORDS_AR = re.compile(
     "|".join(f"(?<![{_ARABIC_RANGE.pattern[1:-1]}]){re.escape(t)}"
              f"(?![{_ARABIC_RANGE.pattern[1:-1]}])"
              for t in _AR_PROFICIENCY_TERMS))
+
+
+# Language names are compared as strings (see compute_skill_gap), so an Arabic
+# job ad asking for "الإنجليزية" never matched a CV listing "English": the two
+# spellings share no characters. Arabic names are mapped to their English form
+# in the matching layer only; what the candidate sees is left as written.
+_AR_LANGUAGE_NAMES = {
+    "english": r"[اإ]ن[جك]ليزي[ةه]?", "arabic": r"عربي[ةه]?",
+    "french": r"فرنسي[ةه]?", "german": r"[اأ]لماني[ةه]?",
+    "spanish": r"[اإ]سباني[ةه]?", "italian": r"[اإ]يطالي[ةه]?",
+    "turkish": r"تركي[ةه]?", "russian": r"روسي[ةه]?",
+    "chinese": r"صيني[ةه]?", "japanese": r"ياباني[ةه]?",
+}
+_AR_LANGUAGE_RES = [
+    (re.compile(f"(?<![{_ARABIC_RANGE.pattern[1:-1]}])(?:ال)?{pat}"
+                f"(?![{_ARABIC_RANGE.pattern[1:-1]}])"), name)
+    for name, pat in _AR_LANGUAGE_NAMES.items()]
 
 
 def _language_core(text: str) -> str:
@@ -577,6 +595,8 @@ def _language_core(text: str) -> str:
     """
     stripped = _PROFICIENCY_WORDS.sub(" ", text)
     stripped = _PROFICIENCY_WORDS_AR.sub(" ", stripped)
+    for rx, name in _AR_LANGUAGE_RES:
+        stripped = rx.sub(f" {name} ", stripped)
     stripped = re.sub(r"[^\w؀-ۿ]+", " ", stripped).strip()
     return stripped or text
 
