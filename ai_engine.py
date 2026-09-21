@@ -25,7 +25,7 @@ FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
 #
 # Pinning also matters for the evaluation itself: an F1 figure is only
 # reproducible if the model behind it cannot be swapped underneath the name.
-MODEL_NAME = "accounts/fireworks/models/deepseek-v4-pro-0813"
+MODEL_NAME = "gpt-5.6-terra"
 
 # The three settings above can be overridden from the environment, which is the
 # only thing the model-comparison experiment needs in order to point the whole
@@ -40,7 +40,7 @@ MODEL_NAME = "accounts/fireworks/models/deepseek-v4-pro-0813"
 # Defaults are unchanged, so the platform behaves exactly as before when none of
 # them is set.
 MODEL_NAME = os.getenv("LLM_MODEL", MODEL_NAME)
-_BASE_URL = os.getenv("LLM_BASE_URL", FIREWORKS_BASE_URL)
+_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
 
 # The key follows the endpoint unless one is named explicitly. Without this the
 # two settings drift apart silently: pointing LLM_BASE_URL at OpenAI while the
@@ -73,7 +73,7 @@ _JSON_MODE = os.getenv("LLM_JSON_MODE", "1") != "0"
 # agent exists precisely to reason about an answer before deciding. The
 # Responses API keeps the reasoning and the tools, so that is the one exposed
 # here. It is off by default because Fireworks does not serve that endpoint.
-_RESPONSES_API = os.getenv("LLM_RESPONSES_API", "0") == "1"
+_RESPONSES_API = os.getenv("LLM_RESPONSES_API", "1") == "1"
 
 if not _API_KEY:
     raise RuntimeError(
@@ -131,6 +131,14 @@ Rules:
 1. Extract only skills — concrete named tools, technologies, programming
    languages, frameworks, methodologies, techniques, or competencies. Not
    general job duties, responsibilities, or achievements described in prose.
+1b. An activity phrase describing work performed — "code refactoring",
+   "module customization", "report automation", "system integration" — names
+   the work, not a skill, even when several of them appear in a
+   comma-separated list inside a sentence. A comma-separated list inside a
+   narrative sentence is not a skills list. Extract such a phrase only when it
+   is an established named methodology or practice that exists independently
+   of this CV (e.g. "Agile", "Test-Driven Development", "Continuous
+   Integration"), or a named tool or technology.
 2. Keep multi-word skills together. If a longer skill phrase contains a shorter
    skill inside it (e.g., "Microsoft SQL Server" contains "SQL Server" and "SQL"),
    extract only the longest/complete form — do not also list the shorter
@@ -142,8 +150,15 @@ Rules:
    rule 7 (e.g., if the CV says "Arabic (Native)" or "English — Advanced (C1)",
    extract that full string, not just "Arabic" or "English" alone).
 5. Ignore names, companies, universities, projects, and job titles.
+   Also ignore the degree, the major and the field of study: a line such as
+   "Computer Science (Artificial Intelligence)" under a university names the
+   qualification the candidate holds, not a skill they claim. A technology
+   named inside a course or project title is extracted only if it is a
+   concrete named technology (e.g. "Flutter" in a project description).
 6. Remove duplicates.
-7. Preserve the original wording exactly as it appears in the text. Never
+7. Preserve the original wording exactly as it appears in the text. This
+   concerns the skill's own words, not the sentence around it: when a named
+   skill sits inside a duty, take the skill and leave the duty. Never
    paraphrase, summarize, or convert a descriptive sentence into a generic
    label — extract the exact phrase as written, word for word, including any
    qualifiers (e.g., "Proven ability to work under pressure" must stay exactly
