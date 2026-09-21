@@ -131,14 +131,24 @@ Rules:
 1. Extract only skills — concrete named tools, technologies, programming
    languages, frameworks, methodologies, techniques, or competencies. Not
    general job duties, responsibilities, or achievements described in prose.
-1b. An activity phrase describing work performed — "code refactoring",
-   "module customization", "report automation", "system integration" — names
-   the work, not a skill, even when several of them appear in a
-   comma-separated list inside a sentence. A comma-separated list inside a
-   narrative sentence is not a skills list. Extract such a phrase only when it
-   is an established named methodology or practice that exists independently
-   of this CV (e.g. "Agile", "Test-Driven Development", "Continuous
-   Integration"), or a named tool or technology.
+1b. Inside a narrative sentence, decide by grammar, not by whether the
+   phrase sounds like a skill. From a sentence describing what the candidate
+   did, extract ONLY a proper name: a tool, technology, language, framework
+   or platform that has a name of its own (Odoo, React.js, Firebase,
+   Flutter, Next.js). A common noun phrase in such a sentence describes the
+   work and is NOT extracted, however established the practice it names may
+   be. In "Optimized legacy systems... through code refactoring, module
+   customization, and database optimization", nothing is extracted: all
+   three are common noun phrases naming the work performed. In "Launched 6+
+   websites using React.js and Firebase", React.js and Firebase are
+   extracted and nothing else is. A comma-separated list inside a narrative
+   sentence is not a skills list.
+1c. A heading that introduces a list labels the items beneath it and is not
+   a skill, and neither is any part of it. From "AI & Machine Learning:
+   Computer Vision, TensorFlow, PyTorch" extract Computer Vision, TensorFlow
+   and PyTorch — never "AI" or "Machine Learning". The same applies to
+   "Programming Languages:", "Web & Mobile Development:", "Cloud, Databases,
+   Tools & Systems:" and "Methodologies & Soft Skills:".
 2. Keep multi-word skills together. If a longer skill phrase contains a shorter
    skill inside it (e.g., "Microsoft SQL Server" contains "SQL Server" and "SQL"),
    extract only the longest/complete form — do not also list the shorter
