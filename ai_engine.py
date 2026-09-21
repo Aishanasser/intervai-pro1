@@ -734,8 +734,9 @@ def compute_skill_gap(candidate_result: dict, jd_result: dict) -> dict:
 # ==========================================
 # 6a-2. Output language
 # ==========================================
-# One instruction block, appended to every generating and judging prompt, so
-# the rule is stated once instead of drifting between eight prompts.
+# One instruction block per language, appended to every generating and judging
+# prompt, so the rule is stated once instead of drifting between the seven
+# prompts that produce text the candidate reads.
 #
 # The technology-name carve-out is load-bearing, not stylistic. Half the
 # Answerability Score is `content_entities`, which counts how many known skills
@@ -757,13 +758,30 @@ interview is conducted in Arabic.
 - JSON keys stay in English exactly as the schema specifies. Only the VALUES
   are in Arabic.
 """,
-    "en": "",
+    "en": """
+LANGUAGE: Write your output in ENGLISH, even when the CV or the job
+advertisement you are reading is written in Arabic. The candidate has chosen
+an English interview.
+
+- Write questions, feedback and any free text in clear English.
+- A skill or technology name taken from the source keeps the form it has
+  there. Do not translate a skill name in order to make a sentence read as
+  English, and do not transliterate one.
+- JSON keys stay in English exactly as the schema specifies.
+""",
 }
 
 
 def _with_language(prompt: str, language: str) -> str:
-    """Append the output-language rule to a prompt. English adds nothing, so
-    English behaviour is byte-identical to before this existed."""
+    """Append the output-language rule to a prompt.
+
+    Both directions are stated. The English one was empty at first, on the
+    reasoning that English is the default and needs no instruction — which
+    holds only while the document itself is English. Given an Arabic CV and no
+    instruction, the model answers in the language it was reading, so a
+    candidate who selected English was interviewed in Arabic and nothing in
+    the prompt contradicted it.
+    """
     return prompt + _LANGUAGE_DIRECTIVE.get(language, "")
 
 
