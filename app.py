@@ -1621,11 +1621,11 @@ def render_upload():
         _qlang = st.session_state.get("questions_language")
         if st.session_state.generated_questions and _qlang and \
                 _qlang != st.session_state.interview_language:
-            st.warning(
-                "The questions already prepared are in "
+            st.info(
+                "The questions prepared earlier are in "
                 + ("Arabic" if _qlang == "ar" else "English")
-                + ". Run the analysis again to have them rewritten in the "
-                  "language selected now.")
+                + ". They will be rewritten in the language selected here when "
+                  "the interview is generated.")
 
     if st.button("🔍 Analyze the Gap Between Your Skills and the Job"):
         if not st.session_state.cv_skills:
@@ -1758,7 +1758,15 @@ def render_upload():
         elif not st.session_state.cv_skills:
             st.warning("Upload and analyze your CV first (step 1).")
         else:
-            if not st.session_state.generated_questions:
+            # Regenerate when the questions on hand were written in a language
+            # other than the one now selected. Without the second test the
+            # selector is advisory: questions written in Arabic at the gap
+            # step survived a switch to English and the interview ran in the
+            # language the candidate had just changed away from.
+            _stale_lang = (st.session_state.get("questions_language") is not None
+                           and st.session_state.questions_language
+                           != st.session_state.interview_language)
+            if not st.session_state.generated_questions or _stale_lang:
                 with st.spinner("Generating gap-prioritized interview questions..."):
                     pipeline_result = run_cv_jd_pipeline(
                     jd_text=job_desc,
