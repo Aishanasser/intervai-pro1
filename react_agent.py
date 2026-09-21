@@ -286,7 +286,21 @@ def run_answer_cycle(question: dict, answer: str, cv_skills: dict,
     # reasoning is still recorded — the report then shows both what it wanted
     # to do and why it was not allowed to.
     budget_note = None
-    if decision["route"] == "probe" and ctx["probe_depth"] >= MAX_PROBE_DEPTH:
+    # Probing asks the candidate to go deeper into what they just said. An
+    # answer that scored at or below ANSWER_WEAK_THRESHOLD has nothing to go
+    # deeper into, and the follow-up prompt is instructed to quote a term from
+    # it — so on a recorded interview an answer of "شس" was followed by a
+    # question asking what the candidate had meant by the characters they
+    # typed. The depth budget cannot catch this: it counts questions, not
+    # whether there is anything to probe. Checked here rather than stated in
+    # the agent's briefing, for the same reason the budgets are: a rule the
+    # model is merely told is a request.
+    _score = evaluation.get("final_score", 0.0)
+    if decision["route"] == "probe" and _score <= ANSWER_WEAK_THRESHOLD:
+        budget_note = (f"nothing to probe — the answer scored "
+                       f"{_score:.2f}, at or below the weak threshold "
+                       f"({ANSWER_WEAK_THRESHOLD})")
+    elif decision["route"] == "probe" and ctx["probe_depth"] >= MAX_PROBE_DEPTH:
         budget_note = (f"probe budget exhausted "
                        f"({ctx['probe_depth']}/{MAX_PROBE_DEPTH} on this skill)")
     elif (decision["route"] == "ask_about_skill"
