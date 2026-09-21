@@ -1071,6 +1071,7 @@ if "cv_uploaded" not in st.session_state: st.session_state.cv_uploaded = False
 if "cv_skills" not in st.session_state: st.session_state.cv_skills = {}
 if "skill_gap" not in st.session_state: st.session_state.skill_gap = {}
 if "generated_questions" not in st.session_state: st.session_state.generated_questions = []
+if "questions_language" not in st.session_state: st.session_state.questions_language = None
 if "interview_answers" not in st.session_state: st.session_state.interview_answers = []
 # The live interview queue. It starts as the generated plan but the agent may
 # insert follow-ups or drop questions mid-interview, so it is kept separately
@@ -1533,10 +1534,14 @@ def render_upload():
             st.session_state.cv_uploaded = True
             st.session_state.cv_skills = result
             st.session_state.cv_file_name = uploaded_file.name
-            # The CV's language decides the interview's language. Detected here,
-            # once, from the text — before it is discarded and only the
-            # extracted skills are kept in session state.
+            # The CV's language supplies the default, detected here once from
+            # the text before it is discarded. It is a suggestion, not a
+            # verdict: uploading a CV re-seeds the selector, and whatever the
+            # candidate then chooses is what every later stage is given.
             st.session_state.interview_language = detect_language(cv_text)
+            st.session_state.lang_choice = (
+                "Arabic / العربية" if st.session_state.interview_language == "ar"
+                else "English (Professional)")
             st.success(f"CV analyzed successfully — {total} skills extracted.")
             if st.session_state.interview_language == "ar":
                 st.info("تم اكتشاف سيرة ذاتية بالعربية — ستكون المقابلة والتقييم بالعربية.")
@@ -1593,13 +1598,34 @@ def render_upload():
         # Arabic, and the supervisor's stated reason for Arabic support is
         # reaching sectors outside tech at all.
         _lang_options = ["English (Professional)", "Arabic / العربية"]
-        _detected_idx = 1 if st.session_state.interview_language == "ar" else 0
-        lang_level = st.selectbox(
-            "Interview Language", _lang_options, index=_detected_idx,
-            help="Detected from your CV. Change it if you want to be interviewed "
-                 "in the other language.",
+        # The widget owns its own session key. Without one, Streamlit rebuilds
+        # the selectbox from `index` on every rerun, and `index` was computed
+        # from the value the widget itself had just written — so a choice made
+        # here was silently reverted to whatever the CV had been detected as.
+        if "lang_choice" not in st.session_state:
+            st.session_state.lang_choice = _lang_options[
+                1 if st.session_state.interview_language == "ar" else 0]
+        st.selectbox(
+            "Interview Language", _lang_options, key="lang_choice",
+            help="Detected from your CV, and yours to change. If you change it "
+                 "after analysing, run the analysis again so the questions are "
+                 "rewritten in that language.",
         )
-        st.session_state.interview_language = "ar" if lang_level.startswith("Arabic") else "en"
+        st.session_state.interview_language = (
+            "ar" if st.session_state.lang_choice.startswith("Arabic") else "en")
+
+        # Questions are written once, in the language that was selected at the
+        # time. Changing the language afterwards cannot rewrite them, so the
+        # mismatch is stated rather than left for the candidate to discover in
+        # the middle of the interview.
+        _qlang = st.session_state.get("questions_language")
+        if st.session_state.generated_questions and _qlang and \
+                _qlang != st.session_state.interview_language:
+            st.warning(
+                "The questions already prepared are in "
+                + ("Arabic" if _qlang == "ar" else "English")
+                + ". Run the analysis again to have them rewritten in the "
+                  "language selected now.")
 
     if st.button("🔍 Analyze the Gap Between Your Skills and the Job"):
         if not st.session_state.cv_skills:
@@ -1623,6 +1649,8 @@ def render_upload():
                     # it scores answers against.
                     st.session_state.jd_skills = pipeline_result.get("jd_skills", {})
                     st.session_state.generated_questions = pipeline_result.get("questions", {}).get("questions", [])
+                    st.session_state.questions_language = \
+                        st.session_state.interview_language
                     _jd = st.session_state.jd_skills
                     _n_jd = sum(len(_jd.get(k) or []) for k in
                                 ("technical_skills", "soft_skills", "languages"))
@@ -1745,6 +1773,8 @@ def render_upload():
                     # it scores answers against.
                     st.session_state.jd_skills = pipeline_result.get("jd_skills", {})
                     st.session_state.generated_questions = pipeline_result.get("questions", {}).get("questions", [])
+                    st.session_state.questions_language = \
+                        st.session_state.interview_language
 
             with st.spinner("Initializing the AI interview server in the database..."):
                 int_id = create_interview_session(st.session_state.user_id, job_title, experience, job_desc)
