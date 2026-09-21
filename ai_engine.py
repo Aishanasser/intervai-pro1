@@ -764,9 +764,15 @@ advertisement you are reading is written in Arabic. The candidate has chosen
 an English interview.
 
 - Write questions, feedback and any free text in clear English.
-- A skill or technology name taken from the source keeps the form it has
-  there. Do not translate a skill name in order to make a sentence read as
-  English, and do not transliterate one.
+- A technology name in Latin script stays exactly as it is: Kubernetes,
+  Python, ROS 2, React.js. Add nothing to it.
+- A skill named in the source in ARABIC script is kept in the question in its
+  Arabic form, because the rest of the system matches the question against
+  that exact name. Put a short English gloss in parentheses straight after it
+  so the sentence still reads as English, for example: "...a situation that
+  demonstrates إدارة فرق العمل التقنية (leading technical teams); what was
+  your role...". Never replace the Arabic name with the gloss alone, and
+  never transliterate it into Latin letters.
 - JSON keys stay in English exactly as the schema specifies.
 """,
 }
