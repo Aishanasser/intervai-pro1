@@ -77,7 +77,7 @@ _RESPONSES_API = os.getenv("LLM_RESPONSES_API", "1") == "1"
 
 if not _API_KEY:
     raise RuntimeError(
-        "No LLM API key found. Set FIREWORKS_API_KEY (or LLM_API_KEY) "
+        "No LLM API key found. Set OPENAI_API_KEY (or LLM_API_KEY) "
         "in your .env file or export it before running."
     )
 
@@ -204,13 +204,27 @@ it asks the candidate to have — whether listed under "Requirements",
 in plain prose anywhere in the text. The text may be in English, Arabic, or a
 mix of both.
 
+A skill is a NAME, not a description of work. Job descriptions state most of
+what they want as duties — "debug issues in a full stack environment",
+"translate data into findings for stakeholders" — and each of those sentences
+contains a skill without being one. Extract the name the sentence rests on
+(debugging, full stack, data analysis), never the sentence itself. Scanning
+the Responsibilities section does NOT mean every responsibility becomes an
+entry.
+
 Rules:
 
 1. Extract only skills — concrete named tools, technologies, programming
    languages, frameworks, methodologies, techniques, or competencies. Not
    generic phrases like "team player mindset" unless they name an actual
    competency (e.g., "communication skills" is fine; "fast-paced
-   environment" is not a skill).
+   environment" is not a skill). Not duties, responsibilities or tasks
+   described in prose, however specific they sound.
+1b. A bare common word is not a skill when it would fit any job in any field —
+   "research", "maintenance", "development", "design", "support", "analysis"
+   on their own say nothing about what the candidate must be able to do. Keep
+   such a word only when the text qualifies it into something nameable
+   ("market research", "predictive maintenance", "circuit design").
 2. Keep multi-word skills together. If a longer skill phrase contains a shorter
    skill inside it (e.g., "Microsoft SQL Server" contains "SQL Server" and "SQL"),
    extract only the longest/complete form — do not also list the shorter
@@ -222,10 +236,13 @@ Rules:
    "Fluent in English" -> "Fluent in English", not just "English").
 5. Ignore the company name, job title, location, salary, and benefits.
 6. Remove duplicates.
-7. Preserve the original wording exactly as it appears in the text — do not
-   paraphrase or generalize a requirement into a shorter label. The only
-   exception is a trailing sentence-ending punctuation mark, which must be
-   dropped.
+7. Preserve the original wording of the SKILL exactly as it appears in the
+   text — do not paraphrase or generalize a named skill into a different
+   label ("Microsoft SQL Server" stays "Microsoft SQL Server", never "SQL").
+   This is about the skill's own words, not about the sentence around it:
+   when a skill sits inside a duty, take the skill and leave the duty. The
+   only other exception is a trailing sentence-ending punctuation mark,
+   which must be dropped.
 8. Treat "required" and "nice to have"/"preferred" skills the same way —
    extract both into the same lists (no separate priority tier).
 9. Return only JSON — no preamble, no explanation, no markdown code fences.
@@ -766,13 +783,16 @@ an English interview.
 - Write questions, feedback and any free text in clear English.
 - A technology name in Latin script stays exactly as it is: Kubernetes,
   Python, ROS 2, React.js. Add nothing to it.
-- A skill named in the source in ARABIC script is kept in the question in its
-  Arabic form, because the rest of the system matches the question against
-  that exact name. Put a short English gloss in parentheses straight after it
-  so the sentence still reads as English, for example: "...a situation that
-  demonstrates إدارة فرق العمل التقنية (leading technical teams); what was
-  your role...". Never replace the Arabic name with the gloss alone, and
-  never transliterate it into Latin letters.
+- REQUIRED. A skill named in the source in Arabic script is written in the
+  question in its Arabic form, followed IMMEDIATELY by an English translation
+  in round brackets, in this exact shape:
+
+      <الاسم كما ورد> (<translation>)
+
+  for example: "...a situation that demonstrates إدارة فرق العمل التقنية
+  (leading technical teams); what was your role...". Both halves are
+  mandatory. Never give the Arabic alone, never give the translation alone,
+  and never transliterate the name into Latin letters.
 - JSON keys stay in English exactly as the schema specifies.
 """,
 }
@@ -865,6 +885,20 @@ Rules:
 2. Each question MUST explicitly name, inside its own text, the skill given
    in its "targets_skill" field. A question about RTOS that never writes
    "RTOS" is invalid.
+2b. When the skill name is written in a different script from the question,
+   write it in its own script and follow it IMMEDIATELY with a translation in
+   round brackets, in this exact shape:
+
+       <name as written> (<translation>)
+
+   Example, for an English question whose target is an Arabic skill name:
+       "How would you apply فهم دورة تطوير التطبيقات (understanding the
+        application development lifecycle) when ..."
+
+   The brackets are not optional and are not decoration: the name is what the
+   scoring layer matches on, and the translation is what makes the sentence
+   readable in the interview language. A question that gives one without the
+   other is invalid.
 3. Stay focused: one question probes one skill. Do not pad a question with
    unrelated skill names just to make it look technical.
 4. Phrase each question with a clear interrogative ("What/How/Why/Which...")
