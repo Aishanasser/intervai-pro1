@@ -14,18 +14,23 @@ load_dotenv()
 # ==========================================
 FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY")
 FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
-# Pinned to the dated snapshot, not the rolling alias.
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+# The deployed model is the one the measurements selected, not the one that
+# happened to be configured first. On the Arabic advertisements it leads on
+# precision (0.83), recall (0.75) and F1 (0.791); on the English sample the
+# top three models sit within the measurement noise floor, so Arabic is what
+# decides. The figures and the argument behind them are in the evaluation.
 #
-# The alias `deepseek-v4-pro` started returning 404 ("Model not found,
-# inaccessible, and/or not deployed") mid-project while still being listed by
-# the /models endpoint — the whole platform stopped working with no code
-# change on our side. The dated build serves the same model and was the
-# fastest of the alternatives measured (3.1s vs 25-30s for kimi-k2p6 and
-# deepseek-v4-flash).
-#
-# Pinning also matters for the evaluation itself: an F1 figure is only
-# reproducible if the model behind it cannot be swapped underneath the name.
+# It replaced `deepseek-v4-pro`, the earlier default. That model had to be
+# pinned to a dated snapshot after its rolling alias began returning 404
+# ("Model not found, inaccessible, and/or not deployed") mid-project while the
+# /models endpoint still listed it: the platform stopped working with no code
+# change on our side. That episode is why a name here is never an alias when
+# the provider offers a dated build — an F1 figure is reproducible only if the
+# model behind the name cannot be swapped underneath it.
 MODEL_NAME = "gpt-5.6-terra"
+_DEFAULT_BASE_URL = OPENAI_BASE_URL
 
 # The three settings above can be overridden from the environment, which is the
 # only thing the model-comparison experiment needs in order to point the whole
@@ -40,7 +45,7 @@ MODEL_NAME = "gpt-5.6-terra"
 # Defaults are unchanged, so the platform behaves exactly as before when none of
 # them is set.
 MODEL_NAME = os.getenv("LLM_MODEL", MODEL_NAME)
-_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+_BASE_URL = os.getenv("LLM_BASE_URL", _DEFAULT_BASE_URL)
 
 # The key follows the endpoint unless one is named explicitly. Without this the
 # two settings drift apart silently: pointing LLM_BASE_URL at OpenAI while the
@@ -71,8 +76,10 @@ _JSON_MODE = os.getenv("LLM_JSON_MODE", "1") != "0"
 # Both escapes were measured to work. Setting reasoning_effort to 'none' is the
 # smaller change but buys tool calling by switching the reasoning off — and the
 # agent exists precisely to reason about an answer before deciding. The
-# Responses API keeps the reasoning and the tools, so that is the one exposed
-# here. It is off by default because Fireworks does not serve that endpoint.
+# Responses API keeps the reasoning and the tools, so that is the one used. It
+# is on by default because the deployed model is served by OpenAI; set
+# LLM_RESPONSES_API=0 when pointing the pipeline at a provider that does not
+# serve that endpoint, such as Fireworks.
 _RESPONSES_API = os.getenv("LLM_RESPONSES_API", "1") == "1"
 
 if not _API_KEY:
@@ -292,7 +299,16 @@ def _call_llm(system_prompt: str, user_prompt: str,
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
 
+# Some reasoning models (Gemma 4 on Google's endpoint) write their reasoning
+# inline as <thought>...</thought> before the answer, and that endpoint offers
+# no way to switch it off. Removing the block leaves the JSON that follows it.
+# This only runs after a plain json.loads has already failed, so a model that
+# returns clean JSON never reaches it and its results are unaffected.
+_THOUGHT_RE = re.compile(r"(?s)<thought>.*?</thought>")
+
+
 def _strip_code_fences(raw_output: str) -> str:
+    raw_output = _THOUGHT_RE.sub("", raw_output)
     return _FENCE_RE.sub("", raw_output.strip()).strip()
 
 
@@ -534,7 +550,14 @@ _GAP_SIMILARITY_THRESHOLD = 0.6
 _GAP_CLEAR_MATCH = 0.92
 _GAP_CLEAR_MISS = 0.10
 
+
 NL = chr(10)
+
+# How much of the CV reaches the coverage call. Long enough for the header,
+# the experience block and the education block, which is where a job title, an
+# employer and a field of study sit; short enough that one gap call does not
+# cost more than the extraction that produced its input.
+_GAP_EVIDENCE_CHARS = 6000
 
 GAP_COVERAGE_PROMPT = """You decide whether a candidate already covers a
 required skill, given the skills their CV lists.
@@ -554,6 +577,13 @@ same field. Two different tools are two different skills:
   "Python"     is NOT covered by Java
   "Redis"      is NOT covered by PostgreSQL
 
+When the CV source text is given, read it as evidence too. The skill list
+is a summary and drops things that are not skills but do evidence one: a job
+title, an employer, a field of study, a membership. A reservoir engineer at an
+oil company who studied petroleum engineering covers "petroleum industry" even
+when those words appear nowhere in the skill list. Judge the requirement, not
+the list.
+
 Judge each requirement independently. When genuinely unsure, answer "missing" —
 asking a candidate about a skill they have wastes one question, while assuming
 a skill they lack leaves a real gap untested.
@@ -570,8 +600,18 @@ copied verbatim.
 """
 
 
-def _resolve_grey_skills(grey: list, candidate_skills: list) -> tuple:
+def _resolve_grey_skills(grey: list, candidate_skills: list,
+                         cv_text: str = "") -> tuple:
     """Ask the model which of `grey` the candidate already covers.
+
+    The model is given the candidate's full skill list, not a shortlist ranked
+    by embedding similarity. Ranking was implemented and measured, and it loses
+    the answer: for the requirement "cloud experience" the similarity model
+    ranks Nginx (0.344), REST APIs (0.339) and even photography (0.260) above
+    AWS (0.210, tenth), because it compares wording and does not know that AWS
+    is a cloud provider. A shortlist long enough to contain AWS is half the CV,
+    which is not a shortlist. Retrieval by similarity therefore fails on the
+    same relation that coverage depends on, and the full list is sent instead.
 
     Returns (covered, missing). On any failure returns ([], grey) — treating an
     unresolved requirement as missing, which is the conservative side: the
@@ -581,9 +621,15 @@ def _resolve_grey_skills(grey: list, candidate_skills: list) -> tuple:
     user_prompt = (
         "Skills the candidate has:" + NL
         + json.dumps(candidate_skills, ensure_ascii=False) + NL + NL
-        + "Requirements to judge:" + NL
-        + json.dumps(grey, ensure_ascii=False)
     )
+    if cv_text and cv_text.strip():
+        # Truncated rather than summarised: a summary would drop exactly the
+        # incidental lines — a job title, an employer — that this call exists
+        # to see.
+        user_prompt += ("CV source text:" + NL
+                        + cv_text.strip()[:_GAP_EVIDENCE_CHARS] + NL + NL)
+    user_prompt += ("Requirements to judge:" + NL
+                    + json.dumps(grey, ensure_ascii=False))
     parsed = _call_llm_json(GAP_COVERAGE_PROMPT, user_prompt)
     if "error" in parsed:
         return [], list(grey)
@@ -608,7 +654,15 @@ _PROFICIENCY_WORDS = re.compile(
     r"\b(?:fluent(?:ly)?|fluency|native|bilingual|mother\s+tongue|proficien\w*|"
     r"advanced|intermediate|beginner|basic|elementary|conversational|working|"
     r"professional|excellent|very|good|level|command|skills?|knowledge|"
-    r"spoken|written|writing|reading|speaking|understanding|in|and|of|a|an|the)\b",
+    r"spoken|written|writing|reading|speaking|understanding|"
+    # Level wording seen in real CVs that the first list missed: a CV saying
+    # "English ( Upper Intermediate)" against a JD asking for "English
+    # language" left "English Upper" and "English language", and neither
+    # contains the other, so the candidate was reported as not speaking
+    # English at all.
+    r"upper|lower|mid|high|low|pre|post|foundation|foundational|limited|"
+    r"full|moderate|fair|course|certificate|languages?|"
+    r"in|and|of|a|an|the)\b",
     re.IGNORECASE)
 # Bounded on both sides by non-Arabic, so a short term cannot be cut out of
 # the middle of a longer word the way a bare alternation would.
@@ -656,6 +710,15 @@ def _language_core(text: str) -> str:
     return stripped or text
 
 
+def _language_words(text: str) -> set:
+    """The words of a language entry after its proficiency wording is stripped.
+
+    A set rather than a string, because matching asks whether two entries name
+    the same language, not whether one spells the other.
+    """
+    return set(_language_core(text).casefold().split())
+
+
 def _get_semantic_model():
     """Lazy-load the sentence-transformers model (only needed for skill-gap matching)."""
     global _SEMANTIC_MODEL
@@ -665,7 +728,8 @@ def _get_semantic_model():
     return _SEMANTIC_MODEL
 
 
-def compute_skill_gap(candidate_result: dict, jd_result: dict) -> dict:
+def compute_skill_gap(candidate_result: dict, jd_result: dict,
+                      cv_text: str = "") -> dict:
     """
     Compare a candidate's extracted skills (from extract_skills() on a CV)
     against a job description's required skills (from extract_skills() on a
@@ -710,12 +774,17 @@ def compute_skill_gap(candidate_result: dict, jd_result: dict) -> dict:
         # candidate who speaks only English satisfies a requirement for French.
         # Comparing the language name as a string is both correct and exact.
         if category == "languages":
-            have = {_language_core(x).casefold() for x in candidate_skills}
+            # Compared word by word, not by containment: what survives the
+            # stripping is the language name plus whatever qualifier the list
+            # did not catch, and two entries for the same language need only
+            # share that name. Containment fails on exactly that case —
+            # "english upper" and "english language" contain neither the other
+            # — while sharing a word is both sufficient and safe, since two
+            # different languages share none.
+            have = [_language_words(x) for x in candidate_skills]
             gap[gap_key] = [
                 x for x in jd_skills
-                if not any(core == h or core in h or h in core
-                           for h in have
-                           for core in (_language_core(x).casefold(),))
+                if not any(_language_words(x) & h for h in have)
             ]
             continue
 
@@ -738,7 +807,8 @@ def compute_skill_gap(candidate_result: dict, jd_result: dict) -> dict:
                 grey.append(jd_skill)         # similarity cannot tell
 
         if grey:
-            _, still_missing = _resolve_grey_skills(grey, candidate_skills)
+            _, still_missing = _resolve_grey_skills(grey, candidate_skills,
+                                                    cv_text)
             missing.extend(still_missing)
 
         # Reported in the JD order rather than code-first then model-first, so

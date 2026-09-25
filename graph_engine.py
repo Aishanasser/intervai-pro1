@@ -88,7 +88,8 @@ def _compute_gap_node(state: PipelineState) -> dict:
         return {}
     if not state.get("cv_skills") or not state.get("jd_skills"):
         return {"error": "Missing cv_skills or jd_skills before gap computation."}
-    gap = compute_skill_gap(state["cv_skills"], state["jd_skills"])
+    gap = compute_skill_gap(state["cv_skills"], state["jd_skills"],
+                            state.get("cv_text", ""))
     return {"skill_gap": gap}
 
 
