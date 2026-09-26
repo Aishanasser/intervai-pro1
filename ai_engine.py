@@ -842,6 +842,20 @@ interview is conducted in Arabic.
   script: write Kubernetes, Python, ROS 2, FreeRTOS, SPI — never transliterate
   them into Arabic letters. This is how engineers actually write and speak, and
   the rest of the system matches on those exact names.
+- REQUIRED. Any OTHER skill named in the source in English — a competence, a
+  method, a domain or a soft skill, such as "Cross-functional Collaboration",
+  "problem-solving abilities" or "Reservoir Simulation" — keeps its English
+  wording and is followed IMMEDIATELY by an Arabic translation in round
+  brackets, in this exact shape:
+
+      <English name as written> (<ترجمة عربية>)
+
+  for example: "...احتجت فيه إلى Cross-functional Collaboration (التعاون بين
+  الأقسام المختلفة) مع فرق الجيولوجيا...". The line between the two cases: the
+  proper name of a product, tool or programming language (CMG, PROSPER, Petrel,
+  Python) is left alone; a phrase that describes an ability is translated. A
+  candidate who cannot read the English phrase cannot answer the question, and
+  the report then records a gap in the skill when the gap was in the wording.
 - JSON keys stay in English exactly as the schema specifies. Only the VALUES
   are in Arabic.
 """,
