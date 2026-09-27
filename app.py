@@ -788,12 +788,30 @@ def save_question_answer(interview_id, question_text, user_answer,
         return False
     try:
         cursor = conn.cursor()
+        payload = json.dumps(evaluation, ensure_ascii=False) if evaluation else None
+        # The same question with the same answer in the same interview is one
+        # answer, however many times it reaches here. Two real interviews
+        # stored such a pair twice — a second click on Submit while the first
+        # was still being evaluated — and the duplicate was averaged into the
+        # final score. A row whose evaluation failed (score NULL) is completed
+        # by the retry instead of being left beside it.
+        cursor.execute(
+            'SELECT id, score FROM interview_qa WHERE interview_id = %s '
+            'AND question_text = %s AND user_answer = %s ORDER BY id LIMIT 1',
+            (interview_id, question_text, user_answer))
+        existing = cursor.fetchone()
+        if existing:
+            if existing[1] is None and score is not None:
+                cursor.execute(
+                    'UPDATE interview_qa SET score = %s, evaluation_json = %s '
+                    'WHERE id = %s', (score, payload, existing[0]))
+                conn.commit()
+            return True
         cursor.execute(
             'INSERT INTO interview_qa '
             '(interview_id, question_text, user_answer, score, evaluation_json) '
             'VALUES (%s, %s, %s, %s, %s)',
-            (interview_id, question_text, user_answer, score,
-             json.dumps(evaluation, ensure_ascii=False) if evaluation else None))
+            (interview_id, question_text, user_answer, score, payload))
         conn.commit()
         return True
     except Error as e:
@@ -817,7 +835,7 @@ _RESUME_FIELDS = (
 )
 
 
-def save_interview_progress(interview_id) -> None:
+def save_interview_progress(interview_id, next_index=None) -> None:
     """Snapshot the live interview so it can be picked up later.
 
     Best effort by design: this runs after every answer, and a failure here
@@ -832,8 +850,14 @@ def save_interview_progress(interview_id) -> None:
     if not conn:
         return
     try:
-        payload = json.dumps({f: st.session_state.get(f) for f in _RESUME_FIELDS},
-                             ensure_ascii=False, default=str)
+        snapshot = {f: st.session_state.get(f) for f in _RESUME_FIELDS}
+        # The snapshot is taken inside answer processing, and the question
+        # index is advanced after it returns — so without this the snapshot
+        # always named the question just answered, and every resumed interview
+        # asked it again.
+        if next_index is not None:
+            snapshot["current_question"] = next_index
+        payload = json.dumps(snapshot, ensure_ascii=False, default=str)
         cursor = conn.cursor()
         cursor.execute("UPDATE interviews SET resume_json = %s WHERE id = %s",
                        (payload, interview_id))
@@ -1086,6 +1110,7 @@ if "off_plan_used" not in st.session_state: st.session_state.off_plan_used = 0
 if "cv_file_name" not in st.session_state: st.session_state.cv_file_name = None
 if "interview_started" not in st.session_state: st.session_state.interview_started = False
 if "current_question" not in st.session_state: st.session_state.current_question = 0
+if "cv_text" not in st.session_state: st.session_state.cv_text = ""
 if "current_interview_id" not in st.session_state: st.session_state.current_interview_id = None
 if "mock_questions" not in st.session_state:
     st.session_state.mock_questions = [
@@ -1534,6 +1559,10 @@ def render_upload():
             st.session_state.cv_uploaded = True
             st.session_state.cv_skills = result
             st.session_state.cv_file_name = uploaded_file.name
+            # Kept, not discarded: the coverage call reads it for evidence the
+            # skill list drops by design — a job title, an employer, a field of
+            # study. Session state only; it is not written to the database.
+            st.session_state.cv_text = cv_text
             # The CV's language supplies the default, detected here once from
             # the text before it is discarded. It is a suggestion, not a
             # verdict: uploading a CV re-seeds the selector, and whatever the
@@ -1636,6 +1665,7 @@ def render_upload():
             with st.spinner("Analyzing the job requirements and comparing them to your skills..."):
                 pipeline_result = run_cv_jd_pipeline(
                     jd_text=job_desc,
+                    cv_text=st.session_state.get("cv_text", ""),
                     cv_skills=st.session_state.cv_skills,
                     language=st.session_state.interview_language,
                 )
@@ -1907,6 +1937,12 @@ def render_interview():
                             if st.session_state.interview_language == "ar"
                             else "Enter your full answer here:")
             user_ans = _answer_editor(answer_label, curr_idx)
+            # Set once this question's answer has been evaluated and stored.
+            # A second click that arrives while the first is still running
+            # reruns the page at the same index; without this it evaluated the
+            # same answer again and let the agent decide a second time.
+            _done_key = (f"answered_{st.session_state.current_interview_id}"
+                         f"_{curr_idx}")
 
             def _process_answer():
                 """Evaluate the answer, then let the agent decide what comes next.
@@ -2008,13 +2044,20 @@ def render_interview():
                         )
                 # The snapshot goes last, so it records the queue as the
                 # agent has just reshaped it rather than as it was before.
-                save_interview_progress(st.session_state.current_interview_id)
+                save_interview_progress(
+                    st.session_state.current_interview_id,
+                    next_index=curr_idx if cycle.get("error") else curr_idx + 1)
+                if not cycle.get("error"):
+                    st.session_state[_done_key] = True
                 return cycle
 
             if not is_last:
                 if st.button("Submit Answer & Go to Next Question ➡️"):
-                    with st.spinner("Evaluating your answer..."):
-                        cycle = _process_answer()
+                    if st.session_state.get(_done_key):
+                        cycle = {}
+                    else:
+                        with st.spinner("Evaluating your answer..."):
+                            cycle = _process_answer()
                     if cycle.get("error"):
                         st.error(cycle["error"])
                     else:
@@ -2022,8 +2065,11 @@ def render_interview():
                         st.rerun()
             else:
                 if st.button("Finish Interview & Get Results 🎓"):
-                    with st.spinner("Evaluating your final answer..."):
-                        cycle = _process_answer()
+                    if st.session_state.get(_done_key):
+                        cycle = {}
+                    else:
+                        with st.spinner("Evaluating your final answer..."):
+                            cycle = _process_answer()
                     if cycle.get("error"):
                         st.error(cycle["error"])
                     else:
